@@ -2,7 +2,7 @@
 
 > Local-first personal knowledge base as MCP: Markdown vault + hybrid RAG retrieval + a safety-first gateway with hash locks, audit trail, privacy zones and rollback — so that AI agents can *use* your knowledge base without being able to wreck it.
 >
-> 状态：🚧 v0.1 抽取中（从个人生产系统脱敏重构，目标 2026-10-20 release）｜ License: MIT
+> 状态：✅ **v0.1** —— 安全网关 + 关键词检索 + MCP stdio server（13 个工具）+ 71 个测试 ｜ License: MIT
 
 ## 为什么做这个
 
@@ -16,13 +16,13 @@
 
 ## 功能
 
-- [ ] MCP server：标准工具面（read / search / rag_search / create / append / update_metadata / move / archive）
-- [ ] 混合检索：语义（bge-small-zh-v1.5）+ 关键词双路召回
-- [ ] 增量索引：只重建变更部分，索引可随时推倒重建（derived artifact）
-- [ ] 隐私分区与人格数据过滤视图
-- [ ] 合成演示知识库（demo vault，无任何真实个人内容）
-- [ ] 每个 gateway 工具的单元测试 + 集成测试
-- [ ] 一键部署：`uvx` / `npx` 可跑的 MCP 配置示例
+- [x] MCP server：标准工具面（read / search / rag_search / create / append / update_metadata / move / archive / restore）
+- [x] 关键词检索：CJK bigram + BM25（语义向量路见路线图）
+- [x] 增量索引：只重建变更部分，索引可随时推倒重建（derived artifact）
+- [x] 隐私分区与人格数据过滤视图
+- [x] 合成演示知识库（demo vault，无任何真实个人内容）
+- [x] 安全与检索的单元测试 + MCP stdio 端到端测试（官方 SDK 客户端）
+- [ ] 一键部署：`uvx` / `npx` 可跑（待发布 PyPI 后提供）
 
 ## 文档
 
@@ -32,7 +32,47 @@
 
 ## 快速开始
 
-（v0.1 后补全：安装、demo vault 体验、接入 Claude/Cursor 等 MCP 客户端的配置片段）
+要求 Python 3.10+。
+
+```bash
+git clone https://github.com/stone1524/secondbrain-mcp
+cd secondbrain-mcp
+pip install -e .
+```
+
+**试用合成 demo vault**（不接你自己的数据，仓库自带、全部为合成内容）：
+
+```bash
+secondbrain-mcp          # 不设 SB_VAULT_ROOT 时默认服务 demo-vault/
+```
+
+**接入自己的知识库 / MCP 客户端**（Claude Code、Cursor 等任何支持 MCP 的客户端）：
+
+```json
+{
+  "mcpServers": {
+    "secondbrain": {
+      "command": "python",
+      "args": ["-m", "secondbrain_mcp.server"],
+      "env": {
+        "SB_VAULT_ROOT": "C:/path/to/your/markdown-vault",
+        "SB_AGENT_LABEL": "claude"
+      }
+    }
+  }
+}
+```
+
+环境变量：`SB_VAULT_ROOT`（vault 目录）、`SB_RAG_DB`（索引库路径，默认 `<vault>/.secondbrain/index.db`）、`SB_AGENT_LABEL`（审计归因标签，多客户端共用时区分写入者）。
+
+首次调用 `rag_reindex` 建索引，之后 `rag_search` 即可检索；`read_note` 才是取证。
+
+## 安全模型
+
+- **写**：`create_inbox_note` 只进 inbox 且永不覆盖；`append_note` / `update_metadata` / `move_note` 全部带 `expected_hash` 乐观并发校验与每文件锁
+- **删**：不存在。唯一移除路径是带批次回滚清单的归档，restore 可整批或按条恢复
+- **隐私**：私有前缀在读、写目的地、索引、搜索四层硬拒绝，泄漏探针测试常绿
+- **审计**：每次读写落 JSONL 日志，`SB_AGENT_LABEL` 标注调用方
 
 ## License
 

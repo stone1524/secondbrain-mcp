@@ -10,13 +10,18 @@ readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "stone1524" }]
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "mcp>=1.2,<3",
+]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
     "ruff>=0.6",
 ]
+
+[project.scripts]
+secondbrain-mcp = "secondbrain_mcp.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/secondbrain_mcp"]
