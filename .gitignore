@@ -31,3 +31,9 @@ Thumbs.db
 
 # 本地工具状态
 .mimosa/
+
+# 检索索引产物
+index.db
+index.db-*
+*.db-wal
+*.db-shm
