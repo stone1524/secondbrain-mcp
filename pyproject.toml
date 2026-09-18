@@ -1,0 +1,23 @@
+[project]
+name = "secondbrain-mcp"
+version = "0.1.0"
+description = "Local-first Markdown knowledge base with a safety-first MCP gateway: hash-locked writes, no-delete archiving, privacy zones, hybrid retrieval."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "stone1524" }]
+requires-python = ">=3.10"
+dependencies = [
+    # W2-W3 按模块落地时逐个锁定版本
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+# secondbrain-mcp = "secondbrain_mcp.server:main"  # W4 接入 MCP 壳后启用
+
+[tool.ruff]
+line-length = 100

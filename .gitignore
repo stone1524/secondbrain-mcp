@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+
+# 工具缓存
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# 环境与密钥（只允许 .env.example 入库）
+.env
+.env.*
+!.env.example
+
+# 索引等派生产物
+*.index
+*.faiss
+index_cache/
+
+# IDE / 系统
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
