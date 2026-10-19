@@ -54,7 +54,7 @@ meta(key PK, value)
 
 ## 检索
 
-**词法**：`postings` 上的 BM25，`k1=1.2`、`b=0.75`。长度归一化只用真实散文——文件桩每个只有几个 token，否则会把平均值压到接近零。
+**词法**：`postings` 上的 BM25，`k1=1.2`、`b=0.75`。长度归一化只用真实散文——文件桩每个只有几个 token，否则会把平均值压到接近零。词项表只有一个来源：`Chunk` 自带 tokenize 的结果，索引器直接把它写进 `postings`，不再二次分词。二次分词曾丢掉 H1 标题（标题不在任何 chunk 的 heading 里），让笔记按自己的名字搜不到。中英混排词按文字系统切开再建 bigram（`关于Watering的内容` → `关于`/`内容`/`watering`），否则这种混合词形与文档侧的任何词项都不相等。`df` 按**去重后的活动文档数**统计——按 postings 行数统计时，一篇多 chunk 笔记会把 df 放大到超过 N，Robertson-Sparck Jones 的 idf 转负，BM25 排序直接反转。
 
 **语义**：每个 generation 把全部向量拼成 `(n_chunks, dim)` 矩阵，查询做一次矩阵乘。
 
