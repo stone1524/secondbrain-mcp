@@ -206,7 +206,7 @@ class Indexer:
 
     def _write_one(self, connection: sqlite3.Connection, item: dict, report: IndexReport) -> None:
         rel = item["rel"]
-        chunks = chunk_note(item["content"])
+        chunks = chunk_note(item["content"], filename=Path(rel).stem)
         self._delete_document_rows(connection, rel)
 
         inserted: list[tuple[str, str]] = []

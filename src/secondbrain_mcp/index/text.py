@@ -58,6 +58,12 @@ def tokenize(text: str) -> list[str]:
             if len(run) < 2:
                 continue
             tokens.add(run)
+            # ``end-to-end`` as one term never matches the query ``end to
+            # end``; hyphen segments are indexed alongside the whole.
+            if "-" in run and not CJK_PATTERN.fullmatch(run):
+                for segment in run.split("-"):
+                    if len(segment) >= 2:
+                        tokens.add(segment)
             if CJK_PATTERN.fullmatch(run):
                 tokens.update(run[index : index + 2] for index in range(len(run) - 1))
     return sorted(tokens)
@@ -91,7 +97,7 @@ def body_length(content: str) -> int:
     return len("".join(body.split()))
 
 
-def chunk_note(content: str, *, max_chars: int = 1800) -> list[Chunk]:
+def chunk_note(content: str, *, max_chars: int = 1800, filename: str = "") -> list[Chunk]:
     _frontmatter, body = split_frontmatter(content)
     chunks: list[Chunk] = []
     heading = ""
@@ -99,7 +105,11 @@ def chunk_note(content: str, *, max_chars: int = 1800) -> list[Chunk]:
     # and it lives *above* the first section. Treating only section headings as
     # context dropped it entirely: a note titled "从开题到成品的端到端流程" became
     # unfindable by its own title because no chunk carried those characters.
+    # The file stem joins it: an Obsidian user names a note first and types that
+    # name into search second; a note findable only through its body text is a
+    # filesystem in which search must already know the answer.
     document_title = ""
+    file_terms = tuple(tokenize(filename)) if filename else ()
     lines: list[str] = []
 
     def flush() -> None:
@@ -108,7 +118,7 @@ def chunk_note(content: str, *, max_chars: int = 1800) -> list[Chunk]:
             return
         context = "\n".join(part for part in (document_title, heading) if part)
         surface = f"{context}\n{text}"
-        tokens = tuple(tokenize(surface))
+        tokens = tuple(sorted(set(tokenize(surface)) | set(file_terms)))
         frequencies = tuple(term_frequencies(tokens).items())
         chunks.append(
             Chunk(
@@ -145,7 +155,7 @@ def chunk_note(content: str, *, max_chars: int = 1800) -> list[Chunk]:
             line.strip() for line in content.splitlines() if line.strip()
         )
         if fallback:
-            tokens = tuple(tokenize(fallback))
+            tokens = tuple(sorted(set(tokenize(fallback)) | set(file_terms)))
             chunks.append(
                 Chunk(
                     heading=heading,

@@ -8,7 +8,9 @@ forces a full rebuild.
 Version 2 changed what a postings row *means* — script-split terms, document
 titles inside the term set, df per document — without changing any column. An
 index built under version 1 returns silently wrong rankings for every note the
-hash-check marks unchanged, so those rows must be rebuilt, not kept.
+hash-check marks unchanged, so those rows must be rebuilt, not kept. Version 3
+widens the row's term set again: hyphen segments and the file stem join the
+index. Same trap, same cure.
 
 Two columns carry the fixes for observed production defects:
 
@@ -34,7 +36,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def connect(db_path: Path | str) -> sqlite3.Connection:

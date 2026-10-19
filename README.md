@@ -2,7 +2,7 @@
 
 > Local-first personal knowledge base as MCP: Markdown vault + hybrid RAG retrieval + a safety-first gateway with hash locks, audit trail, privacy zones and rollback — so that AI agents can *use* your knowledge base without being able to wreck it.
 
-> 状态：✅ **v0.2** —— 13 个工具 · 76 个测试（含真实 stdio 协议端到端）· 检索门禁全过 ｜ License: MIT
+> 状态：✅ **v0.2** —— 13 个工具 · 78 个测试（含真实 stdio 协议端到端）· 检索门禁全过 ｜ License: MIT
 
 ## 为什么做这个
 

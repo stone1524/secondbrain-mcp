@@ -102,6 +102,26 @@ def test_mixed_script_term_splits_into_runs() -> None:
     assert "watering" in doc_tokens and "schedule" in doc_tokens
 
 
+def test_hyphenated_term_matches_spaced_query() -> None:
+    """A file named 01-end-to-end.md queried as '01 end to end' shares no
+    single term: one side is hyphen-joined, the other is words. The hyphen
+    segments must be indexed alongside the whole."""
+    doc_tokens = tokenize("end-to-end")
+    query_tokens = tokenize("end to end")
+    assert {"end", "to"} <= set(doc_tokens)
+    assert {"end", "to"} <= set(query_tokens)
+
+
+def test_filename_stem_joins_the_indexed_surface() -> None:
+    """Users name notes first and type those names into search second. A note
+    whose H1 is Chinese and whose *file stem* is English was unfindable by the
+    English name — the stem must contribute terms like the title does."""
+    chunks = chunk_note("# PCB 设计标准\n\n正文内容若干若干。\n", filename="00-index")
+    assert chunks
+    assert "index" in chunks[0].tokens
+    assert "00" in chunks[0].tokens
+
+
 def test_heading_only_note_still_yields_a_chunk() -> None:
     """Production produced zero chunks here, so the note was invisible *and*
     re-indexed on every single run."""

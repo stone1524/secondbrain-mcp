@@ -85,21 +85,22 @@ all gates     pass
 ```
 
 After the schema-v2 posting fixes (title-in-index, df-per-document,
-script-split tokens), same 36 cases on the same real vault, semantic enabled.
-The prior code reproduces 0.861 exactly — the comparison is honest:
+script-split tokens, hyphen segments, file stem in the surface), same cases on
+the same real vault, semantic enabled. The prior code reproduces 0.861
+exactly — the comparison is honest:
 
 ```
-recall_at_5   0.944   (0.861 -> 0.944, zero regressed cases)
+recall_at_5   1.000   (0.861 -> 1.000, zero regressed cases)
 recall_at_1   0.694   (0.611 -> 0.694)
 semantic      5 rank-1 wins
 null vectors  0
 privacy       0
 ```
 
-Three queries the previous build missed entirely now resolve. Semantic rank-1
-wins fell 7 -> 5: two former vector-only wins became lexical rank-1 once the
-title and the script-split terms indexed correctly, so the vector channel no
-longer has to carry them. The gate is `>= 1`, not `>= 7`.
+Every case the previous build missed now resolves. Semantic rank-1 wins fell
+7 -> 5: two former vector-only wins became lexical rank-1 once titles and
+script-split terms indexed correctly, so the vector channel no longer has to
+carry them. The gate is `>= 1`, not `>= 7`.
 
 ## Shadow comparison
 
