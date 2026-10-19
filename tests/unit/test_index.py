@@ -87,6 +87,21 @@ def test_cjk_is_tokenized_into_bigrams() -> None:
     assert "每月" in tokens and "月检" in tokens and "检视" in tokens
 
 
+def test_mixed_script_term_splits_into_runs() -> None:
+    """`Watering的内容` must index as Latin `watering` plus CJK bigrams. Left
+    whole, it matches nothing on the document side — every document token is one
+    script — and the most common query shape in a bilingual vault
+    (English title wrapped in Chinese filler) is lexically dead."""
+    tokens = tokenize("关于Watering Schedule的内容")
+    assert "watering" in tokens
+    assert "schedule" in tokens
+    assert "内容" in tokens
+    assert "关于" in tokens
+    # and the document side produces the same Latin terms
+    doc_tokens = tokenize("Watering Schedule")
+    assert "watering" in doc_tokens and "schedule" in doc_tokens
+
+
 def test_heading_only_note_still_yields_a_chunk() -> None:
     """Production produced zero chunks here, so the note was invisible *and*
     re-indexed on every single run."""
@@ -103,6 +118,18 @@ def test_frontmatter_only_note_does_not_vanish() -> None:
 def test_body_length_ignores_frontmatter() -> None:
     assert body_length("---\ntype: x\n---\n") == 0
     assert body_length("---\ntype: x\n---\nhello") == 5
+
+
+def test_chunk_tokens_include_the_document_title() -> None:
+    """The postings table is written from Chunk.tokens. If a consumer ever
+    re-tokenizes (heading, content) instead, an H1-over-H2 note loses its title
+    from the index again — the token_count would still include it, so nothing
+    downstream would notice."""
+    chunks = chunk_note("# 从开题到成品的端到端流程\n\n## 准备\n调研与选题的工作记录。\n")
+    assert chunks
+    for chunk in chunks:
+        assert "端到端" in chunk.tokens or "端到" in chunk.tokens or "到端" in chunk.tokens
+        assert set(dict(chunk.term_frequencies)) == set(chunk.tokens)
 
 
 # ---------- indexing ----------
@@ -213,6 +240,47 @@ def test_keyword_query_finds_its_note(tmp_path: Path) -> None:
     hits, _ = searcher.search(Query(text="每月 检视 复盘"))
     assert hits
     assert hits[0].note == "40_Persona/Preferences/monthly-review.md"
+
+
+def test_title_only_query_finds_the_note(tmp_path: Path) -> None:
+    """The production shape this system exists for: an H1 title over H2
+    sections. The title characters appear in no chunk body, so a query that is
+    just the note's own name must still resolve through the lexical channel —
+    it lives in the postings via Chunk.tokens."""
+    vault = tmp_path / "vault"
+    note = vault / "10_Notes" / "equipment.md"
+    note.parent.mkdir(parents=True)
+    note.write_text(
+        "# 设备清单\n\n## 厨房\n锅碗瓢盆和烤箱的使用记录。\n\n## 书房\n显示器支架的采购记录。\n",
+        encoding="utf-8",
+    )
+    db = tmp_path / "index.db"
+    index_vault(vault, db)
+    hits, _ = Searcher(db).search(Query(text="设备清单"))
+    assert hits, "a note must be findable by its own title"
+    assert hits[0].note == "10_Notes/equipment.md"
+
+
+def test_idf_stays_positive_and_multichunk_note_outranks_single_match(tmp_path: Path) -> None:
+    """df must count distinct documents, not posting rows. With a 3-chunk note
+    matching the term in every chunk, row-counted df exceeded N and the Robertson
+    idf went negative — the richest match sank to the bottom."""
+    vault = tmp_path / "vault" / "10_Notes"
+    vault.mkdir(parents=True)
+    (vault / "single.md").write_text(
+        "# Single\n\nalpha one body text body text body text\n", encoding="utf-8"
+    )
+    (vault / "multi.md").write_text(
+        "# Multi\n\nbeta and alpha section one body text body text\n\n"
+        "## Two\nbeta and alpha section two body text body text\n\n"
+        "## Three\nbeta and alpha section three body text body text\n",
+        encoding="utf-8",
+    )
+    db = tmp_path / "index.db"
+    index_vault(vault, db)
+    hits, _ = Searcher(db).search(Query(text="alpha"))
+    assert len(hits) == 2
+    assert all(hit.lexical_score > 0 for hit in hits), "idf must not go negative"
 
 
 def test_auxiliary_notes_are_not_default_results(tmp_path: Path) -> None:

@@ -27,7 +27,7 @@ from pathlib import Path
 from ..core.policy import IndexDecision, NotePath, index_decision
 from .embed import Embedder, LexicalOnlyEmbedder
 from .schema import bump_generation, get_meta, initialize, set_meta
-from .text import chunk_note, term_frequencies, tokenize
+from .text import chunk_note
 
 MARKDOWN_SUFFIX = ".md"
 
@@ -225,8 +225,11 @@ class Indexer:
                     chunk.body_chars,
                 ),
             )
-            tokens = tokenize(f"{chunk.heading}\n{chunk.content}")
-            for term, frequency in term_frequencies(tokens).items():
+            # Postings come from the chunk's own tokenization. Re-deriving tokens
+            # from (heading, content) here dropped the document title — the title
+            # of an H1-over-H2 note lives in neither field — so the note stayed
+            # unfindable by its own name even though its token_count counted it.
+            for term, frequency in chunk.term_frequencies:
                 connection.execute(
                     "INSERT INTO postings(chunk_id, term, tf) VALUES(?, ?, ?)",
                     (chunk_id, term, frequency),

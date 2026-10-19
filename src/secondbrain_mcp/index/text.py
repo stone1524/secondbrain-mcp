@@ -6,6 +6,12 @@ Two production lessons are preserved deliberately:
   tokenizer turns a whole sentence into one un-matchable term.
 * The heading is folded into the chunk's tokens. Production tokenized the body
   only, which made a heading-only query unfindable through the lexical path.
+* The `Chunk` carries the *result* of that tokenization (`tokens`,
+  `term_frequencies`). The indexer must write postings from them, never
+  re-tokenize the stored `heading + content`: those two diverge when a document
+  has an H1 title over H2 sections — the title lives in no chunk heading, and
+  re-tokenizing from the row silently dropped it, making a note unfindable by
+  its own name again.
 
 One production bug is fixed: a note whose entire content is a heading produced
 zero chunks, so it was invisible to retrieval *and* re-indexed on every run
@@ -19,6 +25,7 @@ from dataclasses import dataclass
 
 TOKEN_PATTERN = re.compile(r"[\w-]+", re.UNICODE)
 CJK_PATTERN = re.compile(r"[\u3400-\u9fff]+")
+SCRIPT_RUN_PATTERN = re.compile(r"[\u3400-\u9fff]+|[^\u3400-\u9fff]+")
 HEADING_PATTERN = re.compile(r"^#{1,6}\s+(.+)")
 FRONTMATTER_DELIMITER = "---"
 
@@ -30,15 +37,29 @@ class Chunk:
     ordinal: int
     token_count: int
     body_chars: int
+    tokens: tuple[str, ...]
+    term_frequencies: tuple[tuple[str, int], ...]
 
 
 def tokenize(text: str) -> list[str]:
-    terms = [term for term in TOKEN_PATTERN.findall(str(text).lower()) if len(term) > 1]
+    """Lower-case terms, then index per script run.
+
+    A term that mixes CJK and Latin — ``Watering的内容``, ``Python调试`` — is a
+    single token that matches *nothing*, because every document-side token is
+    one script. Splitting the term into script runs (with bigrams inside CJK
+    runs) lets such a query hit both ``watering`` and ``内容``. Queries that
+    wrap a note's English title in Chinese filler are the most common shape in
+    a bilingual vault, so before this split they were lexically dead."""
     tokens: set[str] = set()
-    for term in terms:
-        tokens.add(term)
-        if CJK_PATTERN.fullmatch(term):
-            tokens.update(term[index : index + 2] for index in range(len(term) - 1))
+    for term in TOKEN_PATTERN.findall(str(text).lower()):
+        if len(term) < 2:
+            continue
+        for run in SCRIPT_RUN_PATTERN.findall(term):
+            if len(run) < 2:
+                continue
+            tokens.add(run)
+            if CJK_PATTERN.fullmatch(run):
+                tokens.update(run[index : index + 2] for index in range(len(run) - 1))
     return sorted(tokens)
 
 
@@ -86,7 +107,9 @@ def chunk_note(content: str, *, max_chars: int = 1800) -> list[Chunk]:
         if not text:
             return
         context = "\n".join(part for part in (document_title, heading) if part)
-        tokens = tokenize(f"{context}\n{text}")
+        surface = f"{context}\n{text}"
+        tokens = tuple(tokenize(surface))
+        frequencies = tuple(term_frequencies(tokens).items())
         chunks.append(
             Chunk(
                 heading=heading,
@@ -94,6 +117,8 @@ def chunk_note(content: str, *, max_chars: int = 1800) -> list[Chunk]:
                 ordinal=len(chunks),
                 token_count=len(tokens),
                 body_chars=len("".join(text.split())),
+                tokens=tokens,
+                term_frequencies=frequencies,
             )
         )
         lines.clear()
@@ -120,7 +145,7 @@ def chunk_note(content: str, *, max_chars: int = 1800) -> list[Chunk]:
             line.strip() for line in content.splitlines() if line.strip()
         )
         if fallback:
-            tokens = tokenize(fallback)
+            tokens = tuple(tokenize(fallback))
             chunks.append(
                 Chunk(
                     heading=heading,
@@ -128,6 +153,8 @@ def chunk_note(content: str, *, max_chars: int = 1800) -> list[Chunk]:
                     ordinal=0,
                     token_count=len(tokens),
                     body_chars=len("".join(fallback.split())),
+                    tokens=tokens,
+                    term_frequencies=tuple(term_frequencies(list(tokens)).items()),
                 )
             )
     return chunks

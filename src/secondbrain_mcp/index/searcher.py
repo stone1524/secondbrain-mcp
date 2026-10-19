@@ -214,12 +214,29 @@ class Searcher:
         if not rows:
             return []
 
+        # N counts *active* documents only. Counting retired chunks inflated it
+        # and skewed idf toward zero on vaults with churn.
         document_count = int(
-            connection.execute("SELECT COUNT(DISTINCT path) AS n FROM chunks").fetchone()["n"]
+            connection.execute(
+                "SELECT COUNT(DISTINCT c.path) AS n FROM chunks c"
+                " JOIN documents d ON d.path = c.path AND d.active = 1"
+                " WHERE c.active = 1"
+            ).fetchone()["n"]
         ) or 1
+        # df is the number of distinct *documents* containing the term, not the
+        # number of posting rows. A note split into k matching chunks inflated df
+        # by k; once df exceeded N the Robertson-Sparck Jones idf went negative and
+        # the most-relevant multi-chunk note sank below single-chunk noise.
         document_frequency: dict[str, int] = {}
         token_set = set(tokens)
-        for row in rows:
+        df_rows = connection.execute(
+            "SELECT DISTINCT p.term, c.path FROM postings p"
+            " JOIN chunks c ON c.id = p.chunk_id AND c.active = 1"
+            " JOIN documents d ON d.path = c.path AND d.active = 1"
+            f" WHERE p.term IN ({placeholders})",
+            tuple(tokens),
+        ).fetchall()
+        for row in df_rows:
             if row["term"] in token_set:
                 document_frequency[row["term"]] = document_frequency.get(row["term"], 0) + 1
 
