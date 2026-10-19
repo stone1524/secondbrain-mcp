@@ -14,6 +14,7 @@ import pytest
 
 from secondbrain_mcp.adapters.mcp_stdio import build_registry, dispatch, tool_manifest
 from secondbrain_mcp.core.config import Settings
+from secondbrain_mcp.index.schema import SCHEMA_VERSION
 
 
 def make_settings(tmp_path: Path) -> Settings:
@@ -431,4 +432,4 @@ def test_index_status_reports_null_vectors(tools) -> None:
     registry, _ = tools
     payload = dispatch("index_status", {}, registry)
     assert "null_embedding_chunks" in payload
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == SCHEMA_VERSION

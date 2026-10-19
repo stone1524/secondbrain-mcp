@@ -1,9 +1,14 @@
 """Index schema and connection handling.
 
-``schema_version = 1`` is deliberately incompatible with the production v6
+``schema_version = 2`` is deliberately incompatible with the production v6
 database: the two differ in what a row means (v6 has no embed-state and no model
 fingerprint), so mixing them would silently corrupt retrieval. A version bump
 forces a full rebuild.
+
+Version 2 changed what a postings row *means* — script-split terms, document
+titles inside the term set, df per document — without changing any column. An
+index built under version 1 returns silently wrong rankings for every note the
+hash-check marks unchanged, so those rows must be rebuilt, not kept.
 
 Two columns carry the fixes for observed production defects:
 
@@ -29,7 +34,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def connect(db_path: Path | str) -> sqlite3.Connection:
