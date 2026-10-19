@@ -1,0 +1,226 @@
+[
+  {
+    "id": "keyword-000",
+    "category": "keyword",
+    "query": "观鸟记录整理",
+    "expected": [
+      "00_Inbox/Conversations/2026-03-01-观鸟记录整理.md"
+    ]
+  },
+  {
+    "id": "paraphrase-001",
+    "category": "paraphrase",
+    "query": "关于观鸟记录整理的内容",
+    "expected": [
+      "00_Inbox/Conversations/2026-03-01-观鸟记录整理.md"
+    ]
+  },
+  {
+    "id": "vague_topic-002",
+    "category": "vague_topic",
+    "query": "那篇讲观鸟记录整理的笔记",
+    "expected": [
+      "00_Inbox/Conversations/2026-03-01-观鸟记录整理.md"
+    ]
+  },
+  {
+    "id": "cross_lingual-003",
+    "category": "cross_lingual",
+    "query": "what does my note say about 2026 03 01 观鸟记录整理",
+    "expected": [
+      "00_Inbox/Conversations/2026-03-01-观鸟记录整理.md"
+    ]
+  },
+  {
+    "id": "keyword-004",
+    "category": "keyword",
+    "query": "镜头清洁指南",
+    "expected": [
+      "00_Inbox/Web/镜头清洁指南.md"
+    ]
+  },
+  {
+    "id": "paraphrase-005",
+    "category": "paraphrase",
+    "query": "关于镜头清洁指南的内容",
+    "expected": [
+      "00_Inbox/Web/镜头清洁指南.md"
+    ]
+  },
+  {
+    "id": "vague_topic-006",
+    "category": "vague_topic",
+    "query": "那篇讲镜头清洁指南的笔记",
+    "expected": [
+      "00_Inbox/Web/镜头清洁指南.md"
+    ]
+  },
+  {
+    "id": "cross_lingual-007",
+    "category": "cross_lingual",
+    "query": "what does my note say about 镜头清洁指南",
+    "expected": [
+      "00_Inbox/Web/镜头清洁指南.md"
+    ]
+  },
+  {
+    "id": "keyword-008",
+    "category": "keyword",
+    "query": "Watering Schedule",
+    "expected": [
+      "10_Notes/watering-schedule.md"
+    ]
+  },
+  {
+    "id": "paraphrase-009",
+    "category": "paraphrase",
+    "query": "关于Watering Schedule的内容",
+    "expected": [
+      "10_Notes/watering-schedule.md"
+    ]
+  },
+  {
+    "id": "vague_topic-010",
+    "category": "vague_topic",
+    "query": "那篇讲Watering Schedule的笔记",
+    "expected": [
+      "10_Notes/watering-schedule.md"
+    ]
+  },
+  {
+    "id": "cross_lingual-011",
+    "category": "cross_lingual",
+    "query": "关于 watering schedule 的记录",
+    "expected": [
+      "10_Notes/watering-schedule.md"
+    ]
+  },
+  {
+    "id": "keyword-012",
+    "category": "keyword",
+    "query": "设备清单",
+    "expected": [
+      "10_Notes/设备清单.md"
+    ]
+  },
+  {
+    "id": "proper_noun-013",
+    "category": "proper_noun",
+    "query": "望远镜",
+    "expected": [
+      "10_Notes/设备清单.md"
+    ]
+  },
+  {
+    "id": "paraphrase-014",
+    "category": "paraphrase",
+    "query": "关于设备清单的内容",
+    "expected": [
+      "10_Notes/设备清单.md"
+    ]
+  },
+  {
+    "id": "vague_topic-015",
+    "category": "vague_topic",
+    "query": "那篇讲设备清单的笔记",
+    "expected": [
+      "10_Notes/设备清单.md"
+    ]
+  },
+  {
+    "id": "cross_lingual-016",
+    "category": "cross_lingual",
+    "query": "what does my note say about 设备清单",
+    "expected": [
+      "10_Notes/设备清单.md"
+    ]
+  },
+  {
+    "id": "keyword-017",
+    "category": "keyword",
+    "query": "Birdhouse Maintenance",
+    "expected": [
+      "20_Reference/birdhouse-maintenance.md"
+    ]
+  },
+  {
+    "id": "paraphrase-018",
+    "category": "paraphrase",
+    "query": "关于Birdhouse Maintenance的内容",
+    "expected": [
+      "20_Reference/birdhouse-maintenance.md"
+    ]
+  },
+  {
+    "id": "vague_topic-019",
+    "category": "vague_topic",
+    "query": "那篇讲Birdhouse Maintenance的笔记",
+    "expected": [
+      "20_Reference/birdhouse-maintenance.md"
+    ]
+  },
+  {
+    "id": "cross_lingual-020",
+    "category": "cross_lingual",
+    "query": "关于 birdhouse maintenance 的记录",
+    "expected": [
+      "20_Reference/birdhouse-maintenance.md"
+    ]
+  },
+  {
+    "id": "keyword-021",
+    "category": "keyword",
+    "query": "观察点",
+    "expected": [
+      "20_Reference/观察点.md"
+    ]
+  },
+  {
+    "id": "proper_noun-022",
+    "category": "proper_noun",
+    "query": "湿地北岸",
+    "expected": [
+      "20_Reference/观察点.md"
+    ]
+  },
+  {
+    "id": "paraphrase-023",
+    "category": "paraphrase",
+    "query": "关于观察点的内容",
+    "expected": [
+      "20_Reference/观察点.md"
+    ]
+  },
+  {
+    "id": "vague_topic-024",
+    "category": "vague_topic",
+    "query": "那篇讲观察点的笔记",
+    "expected": [
+      "20_Reference/观察点.md"
+    ]
+  },
+  {
+    "id": "cross_lingual-025",
+    "category": "cross_lingual",
+    "query": "what does my note say about 观察点",
+    "expected": [
+      "20_Reference/观察点.md"
+    ]
+  },
+  {
+    "id": "proper_noun-026",
+    "category": "proper_noun",
+    "query": "常见种",
+    "expected": [
+      "20_Reference/鸟种清单.md"
+    ]
+  },
+  {
+    "id": "proper_noun-027",
+    "category": "proper_noun",
+    "query": "结论",
+    "expected": [
+      "90_Agent/research/2026-02-retrieval-pilot.md"
+    ]
+  }
+]

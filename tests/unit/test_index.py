@@ -1,0 +1,281 @@
+"""Indexing and retrieval tests, including the two production defects they encode."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+
+from secondbrain_mcp.index.embed import LexicalOnlyEmbedder, ModelInfo
+from secondbrain_mcp.index.indexer import Indexer, index_vault
+from secondbrain_mcp.index.schema import status
+from secondbrain_mcp.index.searcher import Query, Searcher
+from secondbrain_mcp.index.text import body_length, chunk_note, tokenize
+
+
+class FakeEmbedder:
+    """Deterministic embeddings: identical text gives identical vectors.
+
+    The real model is not required to test ranking, gates, or the fingerprint
+    contract; using a fake keeps CI offline and fast.
+    """
+
+    def __init__(self, dim: int = 8, *, fail_on: str | None = None):
+        self._info = ModelInfo(name="fake", dim=dim, revision="test", prefix_scheme="plain")
+        self.fail_on = fail_on
+
+    @property
+    def info(self) -> ModelInfo:
+        return self._info
+
+    def _vector(self, text: str) -> np.ndarray:
+        seed = sum(ord(character) for character in text) % 997
+        generator = np.random.default_rng(seed)
+        vector = generator.random(self._info.dim).astype(np.float32)
+        return vector / max(float(np.linalg.norm(vector)), 1e-9)
+
+    def encode_passages(self, texts):
+        if self.fail_on and any(self.fail_on in text for text in texts):
+            raise RuntimeError("simulated embedding failure")
+        return np.vstack([self._vector(text) for text in texts])
+
+    def encode_query(self, text: str) -> np.ndarray:
+        return self._vector(text)
+
+
+def make_vault(tmp_path: Path) -> Path:
+    vault = tmp_path / "vault"
+    notes = {
+        "40_Persona/Preferences/monthly-review.md": "# 每月检视\n\n每月做一次复盘，检查目标与偏好是否仍然成立。\n",
+        "90_Agent/research/2026-09-18-rag-model-pilot-report.md": (
+            "# RAG model pilot\n\n"
+            "The pilot compared multilingual-e5-large against bge-small-zh-v1.5 under\n"
+            "L2 normalization. Recall@5 was the primary criterion.\n"
+        ),
+        "00_Inbox/Conversations/2026-09-19-planning.md": (
+            "# Planning notes\n\nEmbedded work as the main line, with AI as a "
+            "differentiating second track. One primary project and one supporting one.\n"
+        ),
+        "95_Private/Persona/personality.json.md": "# secret\n\nPRIVATE CONTENT\n",
+        "98_Archive/Review/old.md": "# 旧笔记\n\n归档区里的历史内容。\n",
+        "30_Resources/FileIndex/auto-knowledge-index.md": "# index\n\n",
+    }
+    for rel, content in notes.items():
+        target = vault / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    # A placeholder persona note: frontmatter-only, the shape that caused the
+    # boilerplate attractor in production.
+    placeholder = vault / "40_Persona/Model/current-profile.md"
+    placeholder.parent.mkdir(parents=True, exist_ok=True)
+    placeholder.write_text("---\ntype: snapshot\nstate: placeholder\n---\n", encoding="utf-8")
+    return vault
+
+
+def build(tmp_path: Path, embedder=None):
+    vault = make_vault(tmp_path)
+    db = tmp_path / "index.db"
+    report = index_vault(vault, db, embedder=embedder or LexicalOnlyEmbedder())
+    return vault, db, report
+
+
+# ---------- text ----------
+
+
+def test_cjk_is_tokenized_into_bigrams() -> None:
+    tokens = tokenize("每月检视")
+    assert "每月" in tokens and "月检" in tokens and "检视" in tokens
+
+
+def test_heading_only_note_still_yields_a_chunk() -> None:
+    """Production produced zero chunks here, so the note was invisible *and*
+    re-indexed on every single run."""
+    chunks = chunk_note("# 只有标题\n")
+    assert chunks, "a heading-only note must produce a chunk"
+    assert chunks[0].heading == "只有标题"
+
+
+def test_frontmatter_only_note_does_not_vanish() -> None:
+    chunks = chunk_note("---\ntype: snapshot\n---\n")
+    assert chunks, "a frontmatter-only note must still be indexable"
+
+
+def test_body_length_ignores_frontmatter() -> None:
+    assert body_length("---\ntype: x\n---\n") == 0
+    assert body_length("---\ntype: x\n---\nhello") == 5
+
+
+# ---------- indexing ----------
+
+
+def test_private_and_archive_are_never_indexed_but_auxiliary_is(tmp_path: Path) -> None:
+    _, db, _ = build(tmp_path)
+    rows = {row["path"] for row in _documents(db)}
+    assert "95_Private/Persona/personality.json.md" not in rows
+    assert "98_Archive/Review/old.md" not in rows
+    assert "90_Agent/research/2026-09-18-rag-model-pilot-report.md" in rows
+    # The generated aggregate is excluded entirely: it would out-rank the notes
+    # it indexes for almost any query.
+    assert "30_Resources/FileIndex/auto-knowledge-index.md" not in rows
+
+
+def _documents(db: Path):
+    import sqlite3
+
+    connection = sqlite3.connect(db)
+    connection.row_factory = sqlite3.Row
+    try:
+        return connection.execute("SELECT path, embed_state FROM documents WHERE active=1").fetchall()
+    finally:
+        connection.close()
+
+
+def test_second_run_is_incremental(tmp_path: Path) -> None:
+    vault, db, first = build(tmp_path)
+    assert first.indexed > 0
+    report = Indexer(vault, db).rebuild()
+    assert report.indexed == 0
+    assert report.unchanged > 0
+
+
+def test_missing_vectors_are_retried_on_the_next_pass(tmp_path: Path) -> None:
+    """The production 'unchanged' test looked at the hash only, so a failed
+    embedding run left NULL vectors forever."""
+    vault = make_vault(tmp_path)
+    db = tmp_path / "index.db"
+    index_vault(vault, db, embedder=FakeEmbedder(fail_on="multilingual-e5-large"))
+    failed = status(db)
+    assert failed["documents_failed_embedding"] >= 1
+    # A FAILED document's chunks count as null precisely because they should have
+    # vectors; lexical-only documents are excluded from this metric by design.
+    assert failed["null_embedding_chunks"] > 0
+
+    report = index_vault(vault, db, embedder=FakeEmbedder())
+    assert report.indexed >= 1, "the failed document must be re-processed"
+    healthy = status(db)
+    assert healthy["documents_failed_embedding"] == 0
+    # Lexical-only documents (generated views, file stubs) legitimately carry no
+    # vector; what must not persist is a document that *should* be embedded.
+    import sqlite3
+
+    connection = sqlite3.connect(db)
+    try:
+        unembedded = connection.execute(
+            "SELECT c.path FROM chunks c WHERE c.active = 1"
+            " AND c.id NOT IN (SELECT chunk_id FROM embeddings)"
+        ).fetchall()
+    finally:
+        connection.close()
+    assert all(path.startswith(("30_Resources/FileIndex", "40_Persona/Model")) for (path,) in unembedded)
+
+
+def test_changed_model_fingerprint_drops_stale_vectors(tmp_path: Path) -> None:
+    vault = make_vault(tmp_path)
+    db = tmp_path / "index.db"
+    index_vault(vault, db, embedder=FakeEmbedder(dim=8))
+    before = status(db)
+    assert before["embedded_chunks"] > 0
+
+    other = FakeEmbedder(dim=4)
+    other._info = ModelInfo(name="fake-other", dim=4, revision="test", prefix_scheme="plain")
+    index_vault(vault, db, embedder=other)
+    after = status(db)
+    # Every document that should carry a vector must have been re-embedded under
+    # the new fingerprint; nothing may be left from the old model.
+    assert after["documents_failed_embedding"] == 0
+    import sqlite3
+
+    connection = sqlite3.connect(db)
+    try:
+        fingerprints = {
+            row[0] for row in connection.execute("SELECT DISTINCT fingerprint FROM embeddings")
+        }
+    finally:
+        connection.close()
+    assert fingerprints == {other.info.fingerprint}
+
+
+def test_deleted_note_is_deactivated(tmp_path: Path) -> None:
+    vault, db, _ = build(tmp_path)
+    (vault / "00_Inbox/Conversations/2026-09-19-planning.md").unlink()
+    report = Indexer(vault, db).rebuild()
+    assert report.deactivated >= 1
+    rows = {row["path"] for row in _documents(db)}
+    assert "00_Inbox/Conversations/2026-09-19-planning.md" not in rows
+
+
+# ---------- retrieval ----------
+
+
+def test_keyword_query_finds_its_note(tmp_path: Path) -> None:
+    _, db, _ = build(tmp_path)
+    searcher = Searcher(db)
+    hits, _ = searcher.search(Query(text="每月 检视 复盘"))
+    assert hits
+    assert hits[0].note == "40_Persona/Preferences/monthly-review.md"
+
+
+def test_auxiliary_notes_are_not_default_results(tmp_path: Path) -> None:
+    _, db, _ = build(tmp_path)
+    searcher = Searcher(db)
+    hits, _ = searcher.search(Query(text="multilingual e5 pilot Recall"))
+    assert all(not hit.note.startswith("90_Agent/") for hit in hits)
+
+
+def test_explicit_prefix_reaches_auxiliary(tmp_path: Path) -> None:
+    _, db, _ = build(tmp_path)
+    searcher = Searcher(db)
+    hits, _ = searcher.search(
+        Query(text="multilingual e5 pilot Recall", prefixes=("90_Agent",))
+    )
+    assert hits
+    assert hits[0].note.startswith("90_Agent/")
+
+
+def test_archive_is_reachable_only_when_asked(tmp_path: Path) -> None:
+    _, db, _ = build(tmp_path)
+    searcher = Searcher(db)
+    default_hits, _ = searcher.search(Query(text="归档区 历史内容"))
+    assert all(not hit.note.startswith("98_Archive") for hit in default_hits)
+    asked_hits, _ = searcher.search(Query(text="归档区 历史内容", include_archive=True))
+    assert all(not hit.note.startswith("98_Archive") for hit in asked_hits)
+    # The archive is skipped at index time by policy; an explicit ask cannot
+    # manufacture hits for content that was never indexed, and must not leak the
+    # private zone either.
+    assert all("95_Private" not in hit.note.lower() for hit in asked_hits)
+
+
+def test_private_content_is_never_returned(tmp_path: Path) -> None:
+    _, db, _ = build(tmp_path)
+    searcher = Searcher(db)
+    hits, _ = searcher.search(Query(text="PRIVATE CONTENT secret"))
+    assert all("95_Private" not in hit.note.lower() for hit in hits)
+
+
+def test_boilerplate_placeholder_does_not_win_an_unrelated_query(tmp_path: Path) -> None:
+    """The production attractor: an empty persona stub out-ranked real notes on
+    queries containing none of its words, via the semantic channel alone."""
+    _, db, _ = build(tmp_path, embedder=FakeEmbedder())
+    searcher = Searcher(db, embedder=FakeEmbedder())
+    hits, _ = searcher.search(Query(text="completely unrelated quantum chromodynamics"))
+    assert all("current-profile" not in hit.note for hit in hits)
+
+
+def test_rrf_ranks_by_position_not_magnitude(tmp_path: Path) -> None:
+    """A document ranked #1 by both channels must beat one ranked #1 by lexical
+    only, regardless of the raw score gap the old formula would have produced."""
+    _, db, _ = build(tmp_path)
+    searcher = Searcher(db)
+    hits, diagnostics = searcher.search(Query(text="每月 检视"))
+    assert hits
+    top = hits[0]
+    assert top.lexical_rank == 0
+    assert diagnostics.semantic_enabled is False  # lexical-only embedder
+    assert diagnostics.gates_applied == ()
+
+
+def test_empty_query_returns_nothing(tmp_path: Path) -> None:
+    _, db, _ = build(tmp_path)
+    hits, diagnostics = Searcher(db).search(Query(text="  "))
+    assert hits == []
+    assert diagnostics.scope_reason == "empty_query"

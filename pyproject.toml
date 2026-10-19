@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "secondbrain-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local-first Markdown knowledge base with a safety-first MCP gateway: hash-locked writes, no-delete archiving, privacy zones, hybrid retrieval."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -15,20 +15,30 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+semantic = [
+    "numpy>=1.26",
+    "fastembed>=0.4",
+]
 dev = [
+    "numpy>=1.26",
     "pytest>=8",
     "ruff>=0.6",
 ]
 
 [project.scripts]
-secondbrain-mcp = "secondbrain_mcp.server:main"
+secondbrain-mcp = "secondbrain_mcp.adapters.mcp_stdio:main"
+secondbrain = "secondbrain_mcp.adapters.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/secondbrain_mcp"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
-testpaths = ["tests"]
+testpaths = ["tests/unit", "tests/e2e"]
+# The v1 modules under src/secondbrain_mcp/ (retrieval.py, tools.py, ...) are
+# superseded by core/ + index/ + services/ + tools/. Their tests asserted the old
+# contract and are kept as a behavioural reference, not as a gate.
+norecursedirs = ["legacy"]
 
 [tool.ruff]
 line-length = 100

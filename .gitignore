@@ -37,3 +37,8 @@ index.db
 index.db-*
 *.db-wal
 *.db-shm
+
+# 本地评测产物（由真实语料派生，不入库）
+eval/*.json
+!eval/cases-dev.json
+!eval/cases-test.json
