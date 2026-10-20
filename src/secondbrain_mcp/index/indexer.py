@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..core.policy import IndexDecision, NotePath, index_decision
+from ..core.policy import IndexDecision, NotePath, Zone, index_decision
 from .embed import Embedder, LexicalOnlyEmbedder
 from .schema import bump_generation, get_meta, initialize, set_meta
 from .text import chunk_note
@@ -98,13 +98,13 @@ class Indexer:
     def has_semantic_backend(self) -> bool:
         return not isinstance(self.embedder, LexicalOnlyEmbedder)
 
-    def rebuild(self, *, force: bool = False) -> IndexReport:
+    def rebuild(self, *, force: bool = False, include_archive: bool = False) -> IndexReport:
         connection = initialize(self.db_path, force=force)
         report = IndexReport()
         try:
             self._reconcile_model(connection, report)
             visited: set[str] = set()
-            pending = self._scan(connection, report, visited, force=force)
+            pending = self._scan(connection, report, visited, force=force, include_archive=include_archive)
             for item in pending:
                 self._write_one(connection, item, report)
             report.deactivated = self._deactivate_vanished(connection, visited)
@@ -138,6 +138,7 @@ class Indexer:
         visited: set[str],
         *,
         force: bool = False,
+        include_archive: bool = False,
     ) -> list[dict]:
         pending: list[dict] = []
         for file in _walk(self.vault_root):
@@ -148,8 +149,15 @@ class Indexer:
                 continue
             decision = index_decision(note.key)
             if decision is IndexDecision.SKIP:
-                report.skipped += 1
-                continue
+                # The archive is skipped because it is history, but a caller
+                # that asked for it must get real hits. Indexed lexically only:
+                # 860 machine-written session artifacts are not worth embedding,
+                # and keyword matching already answers "what did I decide about
+                # X back then".
+                if not (include_archive and note.zone is Zone.ARCHIVE):
+                    report.skipped += 1
+                    continue
+                decision = IndexDecision.LEXICAL_ONLY
             try:
                 payload = file.read_bytes()
             except FileNotFoundError:
@@ -356,5 +364,8 @@ def index_vault(
     *,
     embedder: Embedder | None = None,
     force: bool = False,
+    include_archive: bool = False,
 ) -> IndexReport:
-    return Indexer(vault_root, db_path, embedder=embedder).rebuild(force=force)
+    return Indexer(vault_root, db_path, embedder=embedder).rebuild(
+        force=force, include_archive=include_archive
+    )

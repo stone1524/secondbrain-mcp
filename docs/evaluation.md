@@ -56,7 +56,20 @@ recall_at_5          >= 0.85
 semantic_rank1_wins  >= 1        # proves the vector channel is not dead weight
 null_embedding_chunks == 0       # every document that should be embedded, is
 privacy_leakage      == 0        # probed under four casings of the protected dir
+index_side_leak      == 0        # rows in the db whose path is inside 95_Private
 ```
+
+The semantic gate runs only under `--semantic`. In lexical-only mode it is
+reported as `null` (not applicable) rather than `true`, because a gate that
+returns "pass" for a capability that was never exercised is how the previous
+system's metrics became decorative. The `privacy_leakage` probe depends on the
+search layer refusing the private zone, which makes it structurally unable to
+fail on a read-side regression that still indexed the rows — `index_side_leak`
+reads the database directly to cover that half.
+
+Gates are executed by CI (`.github/workflows/ci.yml`) after the demo index is
+built, so a change that breaks recall or leaks a private path into the index
+cannot merge green.
 
 The second gate is the one that would have caught the production regression. A
 hybrid retriever whose semantic channel never changes a rank-1 is not a hybrid;

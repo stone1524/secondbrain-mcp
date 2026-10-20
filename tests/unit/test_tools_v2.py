@@ -7,6 +7,7 @@ wire message.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -497,7 +498,18 @@ def test_restore_accepts_a_legacy_manifest_without_a_schema_stamp(tools) -> None
     source = settings.vault_root / "00_Inbox/Web/legacy.md"
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text("# legacy\ncontent\n", encoding="utf-8")
-    archived = dispatch("archive", {"notes": [{"note": "00_Inbox/Web/legacy.md"}]}, registry)
+    archived = dispatch(
+        "archive",
+        {
+            "notes": [
+                {
+                    "note": "00_Inbox/Web/legacy.md",
+                    "hash": hashlib.sha256(source.read_bytes()).hexdigest(),
+                }
+            ]
+        },
+        registry,
+    )
     batch_id = archived["manifest"]
 
     manifest_path = settings.vault_root / "98_Archive/.manifests" / f"{batch_id}.json"
@@ -625,7 +637,7 @@ def test_empty_search_explains_scope(tools) -> None:
     payload = dispatch("search", {"query": "zzzzqqqxxx"}, registry)
     assert payload["hits"] == []
     assert payload["empty_reason"]["reason"] == "no_match_in_scope"
-    assert "90_Agent" in payload["empty_reason"]["detail"]
+    assert "98_Archive" in payload["empty_reason"]["detail"]
 
 
 def test_search_returns_untrusted_marker(tools) -> None:
@@ -640,3 +652,153 @@ def test_index_status_reports_null_vectors(tools) -> None:
     payload = dispatch("index_status", {}, registry)
     assert "null_embedding_chunks" in payload
     assert payload["schema_version"] == SCHEMA_VERSION
+
+
+# ---------- regression: the four write-safety defects found by the audit ----------
+
+
+def test_overwrite_requires_expected_hash(tools) -> None:
+    """note_create(overwrite=true) used to bypass the hash contract entirely:
+    write_atomic with no lock and no re-verification, while notes.py declared
+    expected_hash mandatory for every mutation and the tool description promised
+    it never overwrote. Three statements, three different behaviours."""
+    registry, settings = tools
+    created = dispatch(
+        "note_create", {"folder": "Web", "filename": "keep.md", "content": "ORIGINAL\n"}, registry
+    )
+    assert created.get("isError") is not True
+
+    clobber = dispatch(
+        "note_create",
+        {
+            "folder": "Web",
+            "filename": "keep.md",
+            "content": "CLOBBERED\n",
+            "overwrite": True,
+        },
+        registry,
+    )
+    assert clobber["isError"] is True
+    assert clobber["error"]["code"] == "HASH_REQUIRED"
+    assert (settings.vault_root / created["created"]).read_text(encoding="utf-8") == "ORIGINAL\n"
+
+
+def test_overwrite_with_the_right_hash_succeeds(tools) -> None:
+    registry, settings = tools
+    created = dispatch(
+        "note_create", {"folder": "Web", "filename": "keep2.md", "content": "ORIGINAL\n"}, registry
+    )
+    read = dispatch("note_read", {"note": created["created"]}, registry)
+    replaced = dispatch(
+        "note_create",
+        {
+            "folder": "Web",
+            "filename": "keep2.md",
+            "content": "REPLACED\n",
+            "overwrite": True,
+            "expected_hash": read["hash"],
+        },
+        registry,
+    )
+    assert replaced.get("isError") is not True
+    assert (settings.vault_root / created["created"]).read_text(encoding="utf-8") == "REPLACED\n"
+
+
+def test_overwrite_with_a_stale_hash_is_refused(tools) -> None:
+    registry, settings = tools
+    created = dispatch(
+        "note_create", {"folder": "Web", "filename": "keep3.md", "content": "ORIGINAL\n"}, registry
+    )
+    replaced = dispatch(
+        "note_create",
+        {
+            "folder": "Web",
+            "filename": "keep3.md",
+            "content": "REPLACED\n",
+            "overwrite": True,
+            "expected_hash": "0" * 64,
+        },
+        registry,
+    )
+    assert replaced["isError"] is True
+    assert replaced["error"]["code"] == "HASH_CONFLICT"
+    assert (settings.vault_root / created["created"]).read_text(encoding="utf-8") == "ORIGINAL\n"
+
+
+def test_restore_refuses_to_write_into_the_private_zone(tools) -> None:
+    """A crafted manifest could restore a file into 95_Private using only the
+    gateway's own tools — the private zone was unreadable but still writable
+    through this side door, because the destination was checked for containment
+    and nothing else."""
+    registry, settings = tools
+    payload_source = settings.vault_root / "98_Archive/Review/manual/planted.md"
+    payload_source.parent.mkdir(parents=True, exist_ok=True)
+    payload_source.write_text("# planted\n", encoding="utf-8")
+    manifest_dir = settings.vault_root / "98_Archive/.manifests"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    (manifest_dir / "batch-crafted.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "batch_id": "batch-crafted",
+                "entries": [
+                    {
+                        "from": "95_Private/planted.md",
+                        "to": "98_Archive/Review/manual/planted.md",
+                        "hash": None,
+                    }
+                ],
+                "restores": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    restored = dispatch("restore", {"batch_id": "batch-crafted"}, registry)
+    assert restored["restored"] == 0
+    assert all(item["status"] != "restored" for item in restored["results"])
+    assert not (settings.vault_root / "95_Private/planted.md").exists()
+
+
+def test_archive_requires_a_hash_per_note(tools) -> None:
+    """Archiving is a mutation: without the hash a caller could remove a note it
+    had never read, and nothing verified the content it was moving."""
+    registry, settings = tools
+    note = settings.vault_root / "00_Inbox/Web/unread.md"
+    note.write_text("# unread\n", encoding="utf-8")
+    payload = dispatch("archive", {"notes": [{"note": "00_Inbox/Web/unread.md"}]}, registry)
+    assert payload["archived"] == 0
+    assert any(item["status"] == "rejected" for item in payload["results"])
+    assert note.exists()
+
+
+def test_archive_refuses_a_stale_hash(tools) -> None:
+    registry, settings = tools
+    note = settings.vault_root / "00_Inbox/Web/stale.md"
+    note.write_text("# stale\n", encoding="utf-8")
+    payload = dispatch(
+        "archive",
+        {"notes": [{"note": "00_Inbox/Web/stale.md", "hash": "0" * 64}]},
+        registry,
+    )
+    assert payload["archived"] == 0
+    assert note.exists()
+
+
+def test_a_write_marks_the_index_dirty(tools) -> None:
+    """The audit's highest-impact finding: a note created a second ago was
+    reported as no_match_in_scope, which reads as 'you never wrote this'."""
+    registry, settings = tools
+    dispatch("index_rebuild", {}, registry)
+    marker = settings.state_root / "index-dirty"
+    assert not marker.exists()
+
+    dispatch(
+        "note_create",
+        {"folder": "Conversations", "filename": "fresh.md", "content": "# 拓扑绝缘体\n\n新概念\n"},
+        registry,
+    )
+    assert marker.exists()
+
+    payload = dispatch("search", {"query": "拓扑绝缘体"}, registry)
+    assert payload["hits"], payload
+    assert not marker.exists()

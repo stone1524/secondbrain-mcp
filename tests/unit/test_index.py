@@ -407,33 +407,37 @@ def test_idf_stays_positive_and_multichunk_note_outranks_single_match(tmp_path: 
     assert all(hit.lexical_score > 0 for hit in hits), "idf must not go negative"
 
 
-def test_auxiliary_notes_are_not_default_results(tmp_path: Path) -> None:
+def test_auxiliary_notes_are_default_results(tmp_path: Path) -> None:
+    """90_Agent is indexed knowledge, not noise: 41% of the live corpus sat
+    behind an exclusion that was meant for ops chatter."""
     _, db, _ = build(tmp_path)
     searcher = Searcher(db)
     hits, _ = searcher.search(Query(text="multilingual e5 pilot Recall"))
-    assert all(not hit.note.startswith("90_Agent/") for hit in hits)
+    assert any(hit.note.startswith("90_Agent/") for hit in hits)
 
 
-def test_explicit_prefix_reaches_auxiliary(tmp_path: Path) -> None:
+def test_explicit_prefix_reaches_auxiliary_case_insensitively(tmp_path: Path) -> None:
     _, db, _ = build(tmp_path)
     searcher = Searcher(db)
-    hits, _ = searcher.search(
-        Query(text="multilingual e5 pilot Recall", prefixes=("90_Agent",))
-    )
-    assert hits
-    assert hits[0].note.startswith("90_Agent/")
+    for spelling in ("90_Agent", "90_agent"):
+        hits, _ = searcher.search(
+            Query(text="multilingual e5 pilot Recall", prefixes=(spelling,))
+        )
+        assert hits, spelling
+        assert hits[0].note.startswith("90_Agent/")
 
 
 def test_archive_is_reachable_only_when_asked(tmp_path: Path) -> None:
-    _, db, _ = build(tmp_path)
+    """The archive used to be skipped at index time, so `include_archive` was a
+    flag that could never return anything — accepted, advertised, and always
+    empty. It is indexed lexically once the caller asks for it."""
+    vault, db, _ = build(tmp_path)
+    index_vault(vault, db, embedder=LexicalOnlyEmbedder(), include_archive=True)
     searcher = Searcher(db)
     default_hits, _ = searcher.search(Query(text="归档区 历史内容"))
     assert all(not hit.note.startswith("98_Archive") for hit in default_hits)
     asked_hits, _ = searcher.search(Query(text="归档区 历史内容", include_archive=True))
-    assert all(not hit.note.startswith("98_Archive") for hit in asked_hits)
-    # The archive is skipped at index time by policy; an explicit ask cannot
-    # manufacture hits for content that was never indexed, and must not leak the
-    # private zone either.
+    assert any(hit.note.startswith("98_Archive") for hit in asked_hits)
     assert all("95_Private" not in hit.note.lower() for hit in asked_hits)
 
 

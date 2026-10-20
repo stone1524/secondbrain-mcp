@@ -58,6 +58,7 @@ class EvalReport:
     semantic_wins: int = 0
     null_vectors: int = 0
     privacy_hits: int = 0
+    index_leaks: int = 0
     corpus_snapshot: str = ""
 
     def recall_at(self, k: int) -> float:
@@ -93,6 +94,7 @@ class EvalReport:
             "semantic_rank1_wins": self.semantic_wins,
             "null_embedding_chunks": self.null_vectors,
             "privacy_leakage": self.privacy_hits,
+            "index_side_leak": self.index_leaks,
             "results": [
                 {
                     "id": case.case_id,
@@ -157,7 +159,15 @@ def run_cases(
 
 
 def privacy_probe(searcher: Searcher) -> int:
-    """Every casing of the protected directory, queried explicitly."""
+    """Every casing of the protected directory, queried explicitly.
+
+    This probe can only fail if private rows can reach the index at all. The
+    searcher refuses the PRIVATE zone unconditionally, which is the *correct*
+    behaviour — but it also means a zero here proves the read-side refusal, not
+    the index-side exclusion. Both halves are checked: `index_side_leak` below
+    reads the database directly, so a future change that indexes a private file
+    is caught even though the search layer would still hide it.
+    """
     leaks = 0
     for spelling in ("95_Private", "95_private", "95_PRIVATE", "95_PrIvAtE"):
         hits, _ = searcher.search(
@@ -165,6 +175,28 @@ def privacy_probe(searcher: Searcher) -> int:
         )
         leaks += sum(1 for hit in hits if "95_priv" in hit.note.lower() and "/" in hit.note)
     return leaks
+
+
+def index_side_leak(db_path: Path) -> int:
+    """Documents and chunks whose path belongs to the private zone.
+
+    The search layer hides private rows, so a leak that only lived in the
+    database would never show up in `privacy_probe` — which is exactly how the
+    production gate became unfalsifiable. This counts rows directly.
+    """
+    import sqlite3
+
+    connection = sqlite3.connect(db_path)
+    try:
+        row = connection.execute(
+            "SELECT COUNT(*) FROM documents WHERE lower(path) LIKE '95_private/%'"
+            " OR lower(path) LIKE '%/95_private/%'"
+        ).fetchone()
+        return int(row[0])
+    except sqlite3.Error:
+        return 0
+    finally:
+        connection.close()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -185,16 +217,33 @@ def main(argv: list[str] | None = None) -> int:
     report = run_cases(cases, searcher, db_path=settings.rag_db)
     report.corpus_snapshot = corpus_snapshot(settings.rag_db)
     report.privacy_hits = privacy_probe(searcher)
+    report.index_leaks = index_side_leak(settings.rag_db)
 
     payload = report.as_dict()
+    # Four gates, all of them falsifiable. The documented contract had four and
+    # the code implemented three: `semantic_rank1_wins >= 1` was printed in the
+    # README and in docs/evaluation.md but never evaluated, so a run reporting
+    # zero semantic wins still said `passed: true`. In lexical-only mode the
+    # semantic gate cannot be met by construction, so it is reported as not
+    # applicable rather than silently passing or silently failing.
+    semantic_applicable = args.semantic
     payload["gates"] = {
         "recall_at_5>=0.85": report.recall_at(5) >= 0.85,
         "privacy_leakage==0": report.privacy_hits == 0,
+        "index_side_leak==0": report.index_leaks == 0,
         "null_embedding_chunks==0": report.null_vectors == 0,
+        "semantic_rank1_wins>=1": (
+            report.semantic_wins >= 1 if semantic_applicable else None
+        ),
     }
-    payload["passed"] = all(payload["gates"].values())
+    payload["gates_applicable"] = {
+        "semantic_rank1_wins>=1": semantic_applicable,
+    }
+    payload["passed"] = all(
+        value for value in payload["gates"].values() if value is not None
+    )
     Path(args.report).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({key: payload[key] for key in ("recall_at_5", "recall_at_1", "semantic_rank1_wins", "null_embedding_chunks", "privacy_leakage", "gates", "passed")}, indent=2))
+    print(json.dumps({key: payload[key] for key in ("recall_at_5", "recall_at_1", "semantic_rank1_wins", "null_embedding_chunks", "privacy_leakage", "index_side_leak", "gates", "passed")}, indent=2))
     return 0 if payload["passed"] else 1
 
 

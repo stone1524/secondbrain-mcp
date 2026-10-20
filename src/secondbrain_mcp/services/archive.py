@@ -23,8 +23,9 @@ from uuid import uuid4
 
 from ..core.atomic import write_atomic
 from ..core.audit import AuditLog
-from ..core.errors import InvalidArguments, NoteNotFound, PathDenied
-from ..core.policy import NotePath, VaultPathError, read_allowed
+from ..core.errors import HashRequired, InvalidArguments, NoteNotFound, PathDenied
+from ..core.locking import FileLock, LockConflictError
+from ..core.policy import NotePath, PrivateNoteError, VaultPathError, read_allowed
 
 MANIFEST_SCHEMA_VERSION = 1
 
@@ -35,6 +36,8 @@ class ArchiveService:
     audit: AuditLog
     archive_dirname: str = "98_Archive"
     review_subdir: str = "Review"
+    lock_dir: Path | None = None
+    stale_lock_seconds: float = 300.0
 
     @property
     def archive_root(self) -> Path:
@@ -62,6 +65,12 @@ class ArchiveService:
             note = str(request.get("note", ""))
             expected = request.get("hash")
             try:
+                if not expected:
+                    # Archiving is a mutation: the hash is what proves the caller
+                    # saw the content it is about to remove from the live tree.
+                    # The production archiver treated it as optional, so a
+                    # caller could archive a file it had never read.
+                    raise HashRequired()
                 path = self._existing(note)
                 category_name = str(request.get("category") or category or "manual")
                 if path.key.startswith(NotePath.fold(f"{self.archive_dirname}/")):
@@ -75,7 +84,7 @@ class ArchiveService:
                 }
                 # Re-verify under no lock but immediately before use; the strict
                 # check happens inside the lock below.
-                if expected and self._digest(path.absolute) != expected:
+                if self._digest(path.absolute) != expected:
                     results.append(
                         {
                             "note": note,
@@ -95,7 +104,7 @@ class ArchiveService:
                     )
                     continue
                 planned.append(entry)
-            except (NoteNotFound, InvalidArguments, PathDenied) as error:
+            except (NoteNotFound, InvalidArguments, PathDenied, HashRequired) as error:
                 results.append({"note": note, "status": "rejected", "reason": str(error)})
 
         if dry_run or not planned:
@@ -142,20 +151,36 @@ class ArchiveService:
         for entry in planned:
             path = NotePath.parse(self.root, entry["from"])
             try:
-                if entry["hash"] and self._digest(path.absolute) != entry["hash"]:
-                    results.append(
-                        {
-                            "note": entry["from"],
-                            "status": "skipped",
-                            "reason": "content changed since it was read",
-                        }
-                    )
-                    continue
                 destination = NotePath.parse(self.root, entry["to"])
                 if destination.absolute.exists():
                     raise InvalidArguments("archive destination already exists")
-                destination.absolute.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(path.absolute, destination.absolute)
+                # The lock and the in-lock re-verification are what make the move
+                # atomic against a concurrent write. Without them a writer that
+                # had already passed its own hash check could re-create the
+                # source path right after the move, leaving the note present in
+                # both places — archived and alive at once.
+                lock = (
+                    FileLock(
+                        self.lock_dir,
+                        path.absolute,
+                        relative_name=path.rel,
+                        stale_after_seconds=self.stale_lock_seconds,
+                    )
+                    if self.lock_dir is not None
+                    else _null_lock()
+                )
+                with lock:
+                    if self._digest(path.absolute) != entry["hash"]:
+                        results.append(
+                            {
+                                "note": entry["from"],
+                                "status": "skipped",
+                                "reason": "content changed since it was read",
+                            }
+                        )
+                        continue
+                    destination.absolute.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(path.absolute, destination.absolute)
                 moved.append({**entry, "size": destination.absolute.stat().st_size})
                 results.append(
                     {
@@ -164,7 +189,7 @@ class ArchiveService:
                         "destination": entry["to"],
                     }
                 )
-            except (OSError, InvalidArguments, VaultPathError) as error:
+            except (OSError, InvalidArguments, VaultPathError, LockConflictError) as error:
                 results.append({"note": entry["from"], "status": "skipped", "reason": str(error)})
 
         _rewrite_manifest(
@@ -231,6 +256,17 @@ class ArchiveService:
                     raise PathDenied("manifest entry is not a vault-relative path")
                 original = NotePath.parse(self.root, str(source_raw))
                 archived = NotePath.parse(self.root, str(archive_raw))
+                # A restore writes the original path back, so the destination
+                # obeys the same writability rule as any other write. Without
+                # this, a crafted manifest could place a file inside 95_Private
+                # using nothing but the gateway's own tools — the private zone
+                # was unreadable but still writable through this side door.
+                try:
+                    original.assert_writable()
+                except PrivateNoteError as error:
+                    raise PathDenied(
+                        "restore destination is inside a non-writable zone"
+                    ) from error
                 archive_prefix = NotePath.fold(f"{self.archive_dirname}/")
                 if not archived.key.startswith(archive_prefix):
                     raise PathDenied("archived path is outside the archive directory")
@@ -368,6 +404,23 @@ class ArchiveService:
         import hashlib
 
         return hashlib.sha256(file.read_bytes()).hexdigest()
+
+
+def _null_lock():
+    """A no-op context manager for callers that did not pass a lock directory.
+
+    Services built without one (unit tests, one-shot CLI use) must not silently
+    lose the in-lock re-verification, so the check still runs; only the
+    cross-process mutex is absent."""
+
+    class _Null:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    return _Null()
 
 
 def _rewrite_manifest(path: Path, *, state: str, entries: list[dict]) -> None:

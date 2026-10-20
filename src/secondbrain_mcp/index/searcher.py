@@ -30,6 +30,7 @@ import numpy as np
 
 from ..core.policy import (
     Zone,
+    archive_scope_requested,
     in_default_scope,
     read_allowed,
     scope_prefixes_allows,
@@ -204,6 +205,7 @@ class Searcher:
 
     def _scope(self, query: Query) -> callable:
         prefixes = list(query.prefixes)
+        wants_archive_zone = archive_scope_requested(prefixes, include_archive=query.include_archive)
 
         def allowed(note: str) -> bool:
             zone = zone_of(note)
@@ -214,9 +216,10 @@ class Searcher:
                 # never answers; they exist so a caller can find them by name.
                 return bool(prefixes) or query.include_archive
             if zone is Zone.ARCHIVE:
-                return query.include_archive or any(
-                    note.startswith(prefix.strip("/") + "/") for prefix in prefixes
-                )
+                # Folded comparison: `include_archive` used to be a lie because
+                # the indexer never wrote archive rows at all, and a raw
+                # startswith missed `98_archive` spelled in lower case.
+                return wants_archive_zone
             if prefixes:
                 return scope_prefixes_allows(note, prefixes)
             return in_default_scope(note)

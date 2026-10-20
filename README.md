@@ -98,7 +98,7 @@ secondbrain-mcp          # 不设 SB_VAULT_ROOT 时默认服务 demo-vault/
 python -m secondbrain_mcp.eval.run --cases eval/cases-dev.json --semantic
 ```
 
-四道门禁：`recall@5 ≥ 0.85`、`semantic rank-1 wins ≥ 1`、`null vectors == 0`、`privacy leakage == 0`。
+五道门禁，每一道都能真的失败：`recall@5 ≥ 0.85`、`semantic rank-1 wins ≥ 1`（仅在 `--semantic` 下生效，词法模式报告为 not-applicable 而不是静默通过）、`null vectors == 0`、`privacy leakage == 0`（读侧四种拼写探测）、`index_side_leak == 0`（直接读库，抓读侧门禁看不见的入库泄漏）。CI 会先建 demo 索引，再跑门禁与部署契约检查。
 当前结果与旧系统的对照见 [docs/evaluation.md](docs/evaluation.md)。
 
 ## License

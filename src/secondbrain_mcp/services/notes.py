@@ -155,6 +155,7 @@ class NoteService:
         filename: str,
         content: str,
         overwrite: bool = False,
+        expected_hash: str | None = None,
     ) -> dict:
         if folder not in self.inbox_folders:
             raise InvalidArguments(
@@ -169,10 +170,34 @@ class NoteService:
         destination = self.root / "00_Inbox" / folder / safe_name
         path = NotePath.from_disk(self.root, destination)
         path.assert_writable()
+        # An overwrite is a mutation of existing content and therefore obeys the
+        # same contract as append/patch/meta/move: hash required, re-verified
+        # under the lock. The production gateway accepted `overwrite: true` as a
+        # way to opt out of optimistic concurrency entirely, while the tool
+        # description still promised it never overwrote.
+        if overwrite and expected_hash is None and path.absolute.exists():
+            self.audit.record(
+                "note_create", path.rel, phase="outcome", ok=False, error="HASH_REQUIRED"
+            )
+            raise HashRequired()
         self.audit.record("note_create", path.rel, phase="intent")
         path.absolute.parent.mkdir(parents=True, exist_ok=True)
         if overwrite:
-            write_atomic(path.absolute, content)
+            try:
+                with FileLock(
+                    self.lock_dir,
+                    path.absolute,
+                    relative_name=path.rel,
+                    stale_after_seconds=self.stale_lock_seconds,
+                ):
+                    if path.absolute.exists():
+                        current = read_preserving_newlines(path.absolute)
+                        self._assert_hash(current, expected_hash)
+                    write_atomic(path.absolute, content)
+            except LockConflictError as error:
+                raise GatewayError(
+                    "LOCK_BUSY", str(error), "Retry in a few seconds"
+                ) from error
             outcome = "overwritten"
         else:
             try:
