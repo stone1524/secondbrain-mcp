@@ -24,7 +24,10 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import Self
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # typing.Self is 3.11+; pyproject declares 3.10 support
+    from typing import Self
 
 
 class LockConflictError(RuntimeError):
