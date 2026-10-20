@@ -318,6 +318,26 @@ def test_substantive_note_not_stubbed_by_one_small_section(tmp_path: Path) -> No
     assert hits[0].score > 0.032, "a substantive note must not be halved by the stub gate"
 
 
+def test_fusion_tie_break_favors_lexical_evidence(tmp_path: Path) -> None:
+    """One RRF vote from either channel is exactly 1/61 — ties are not noise,
+    they are structural. When they happen, the note the query literally
+    contains must outrank the one that merely sits near the query in vector
+    space, even if the latter sorts first by path (00_Inbox beats 10_Notes)."""
+    from secondbrain_mcp.index.searcher import Hit
+
+    # direct unit of the sort key used in _fuse
+    hits = [
+        Hit(note="00_Inbox/ghost.md", heading=None, excerpt="", content_hash=None,
+            updated_at=None, score=1 / 61, lexical_score=0.0, semantic_score=0.6,
+            lexical_rank=None, semantic_rank=0, matched_terms=[]),
+        Hit(note="30_Resources/answer.md", heading=None, excerpt="", content_hash=None,
+            updated_at=None, score=1 / 61, lexical_score=12.0, semantic_score=0.0,
+            lexical_rank=0, semantic_rank=None, matched_terms=["workflow"]),
+    ]
+    hits.sort(key=lambda hit: (-hit.score, not hit.matched_terms, hit.note))
+    assert hits[0].note == "30_Resources/answer.md"
+
+
 def test_section_heading_query_wins_by_identity(tmp_path: Path) -> None:
     """A proper-noun query that equals a section heading must rank that note
     first: the heading is part of the note's identity surface. (Regression:

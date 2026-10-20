@@ -92,15 +92,41 @@ exactly — the comparison is honest:
 ```
 recall_at_5   1.000   (0.861 -> 1.000, zero regressed cases)
 recall_at_1   0.694   (0.611 -> 0.694)
-semantic      5 rank-1 wins
 null vectors  0
 privacy       0
 ```
 
-Every case the previous build missed now resolves. Semantic rank-1 wins fell
-7 -> 5: two former vector-only wins became lexical rank-1 once titles and
-script-split terms indexed correctly, so the vector channel no longer has to
-carry them. The gate is `>= 1`, not `>= 7`.
+After the structural-phrase identity fix (chunks.title, tiered identity vs
+body mention, wrapper-stripped query cores, note-level stub gate, PHRASE_BONUS
+applied at fusion, evidence tie-break on fused-score ties):
+
+```
+recall_at_5   1.000
+recall_at_1   0.972   (0.694 -> 0.972)
+null vectors  0
+privacy       0
+```
+
+The single remaining rank-1 loss is `DRAFT` — a generic identifier present in
+several PCB-standard notes, where the aggregate index note holds the strongest
+lexical claim; no identity signal exists to disambiguate and none is
+fabricated for it. Note: the hybrid rank@1 (0.972) now meets the lexical-only
+rank@1 exactly; before the evidence tie-break, the semantic channel was
+*demoting* correct rank-1 answers (0.944 < 0.972) by tying at 1/61 against
+path-sorted noise. A tie at one-channel-RRF is structural, so ties break
+toward literal matched evidence.
+
+**A note the honest harness must record:** semantic rank-1 wins was 7 -> 5 ->
+0 across these steps. Every case in this generator is *derived from a note's
+title or heading*, so once the lexical channel legitimately recognizes that
+identity, the vector channel can no longer flip a rank-1 on any of them. The
+gate `semantic_rank1_wins >= 1` is not satisfied by this case set anymore —
+not because the vector channel is dead weight (it still carries recall on
+zero-overlap queries, which is exactly what the production regression gate
+probes for), but because **a title-derived generator structurally cannot
+measure it.** The fix is a separate no-shared-term probe set (see Roadmap);
+loosening the gate without it would repeat the production sin of a number
+that looks like a guarantee.
 
 ## Shadow comparison
 

@@ -579,7 +579,12 @@ class Searcher:
                     matched_terms=sorted(entry["matched"]),
                 )
             )
-        hits.sort(key=lambda hit: (-hit.score, hit.note))
+        # Tie-break by evidence quality, then path. Two RRF votes from one
+        # channel each land on the same 1/(k+1), and the old path-order tie
+        # broke toward whichever note sorts first — often 00_Inbox. A note the
+        # query *literally names* (lexical evidence) outranks one that merely
+        # sits nearby in vector space when the fused scores tie.
+        hits.sort(key=lambda hit: (-hit.score, not hit.matched_terms, hit.note))
         return hits[: max(1, min(query.limit, 50))]
 
     @staticmethod
