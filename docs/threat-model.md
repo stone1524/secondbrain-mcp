@@ -52,3 +52,15 @@ restore validates paths rather than trusting `from`/`to`.
 - **`embed_state = FAILED` is retried on every index run.** A permanently broken
   model will cause a re-embedding attempt each time rather than an escalating
   backoff.
+- **Dependency advisories are triaged, not absent.** The shipped surface depends
+  on `mcp` (which pulls `pyjwt[crypto]` for its auth paths), plus optional
+  `numpy`/`fastembed` for the semantic channel. `pip-audit` runs against both
+  the dev and the serving venvs (last clean run: 2026-10-20, after upgrading
+  pyjwt/pip/setuptools/urllib3). Upgrades on the `mcp` line are constrained by
+  the `>=1.2,<3` pin, so triage reads which package an advisory sits in, not
+  just the version number.
+- **The nightly harness never writes the serving index.** It builds and scores
+  against a staging state root, and its live probe inspects a *copy* of the
+  serving database (SQLite backup API). A schema-mismatch DROP can therefore
+  only ever hit a staging or already-reconciled state — never the index the
+  running gateway processes depend on (`adapters/healthcheck.py`).
