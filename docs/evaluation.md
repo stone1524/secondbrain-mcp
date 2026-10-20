@@ -56,7 +56,20 @@ recall_at_5          >= 0.85
 semantic_rank1_wins  >= 1        # proves the vector channel is not dead weight
 null_embedding_chunks == 0       # every document that should be embedded, is
 privacy_leakage      == 0        # probed under four casings of the protected dir
+index_side_leak      == 0        # rows in the db whose path is inside 95_Private
 ```
+
+The semantic gate runs only under `--semantic`. In lexical-only mode it is
+reported as `null` (not applicable) rather than `true`, because a gate that
+returns "pass" for a capability that was never exercised is how the previous
+system's metrics became decorative. The `privacy_leakage` probe depends on the
+search layer refusing the private zone, which makes it structurally unable to
+fail on a read-side regression that still indexed the rows — `index_side_leak`
+reads the database directly to cover that half.
+
+Gates are executed by CI (`.github/workflows/ci.yml`) after the demo index is
+built, so a change that breaks recall or leaks a private path into the index
+cannot merge green.
 
 The second gate is the one that would have caught the production regression. A
 hybrid retriever whose semantic channel never changes a rank-1 is not a hybrid;
@@ -83,6 +96,50 @@ null vectors  0
 privacy       0
 all gates     pass
 ```
+
+After the schema-v2 posting fixes (title-in-index, df-per-document,
+script-split tokens, hyphen segments, file stem in the surface), same cases on
+the same real vault, semantic enabled. The prior code reproduces 0.861
+exactly — the comparison is honest:
+
+```
+recall_at_5   1.000   (0.861 -> 1.000, zero regressed cases)
+recall_at_1   0.694   (0.611 -> 0.694)
+null vectors  0
+privacy       0
+```
+
+After the structural-phrase identity fix (chunks.title, tiered identity vs
+body mention, wrapper-stripped query cores, note-level stub gate, PHRASE_BONUS
+applied at fusion, evidence tie-break on fused-score ties):
+
+```
+recall_at_5   1.000
+recall_at_1   0.972   (0.694 -> 0.972)
+null vectors  0
+privacy       0
+```
+
+The single remaining rank-1 loss is `DRAFT` — a generic identifier present in
+several PCB-standard notes, where the aggregate index note holds the strongest
+lexical claim; no identity signal exists to disambiguate and none is
+fabricated for it. Note: the hybrid rank@1 (0.972) now meets the lexical-only
+rank@1 exactly; before the evidence tie-break, the semantic channel was
+*demoting* correct rank-1 answers (0.944 < 0.972) by tying at 1/61 against
+path-sorted noise. A tie at one-channel-RRF is structural, so ties break
+toward literal matched evidence.
+
+**A note the honest harness must record:** semantic rank-1 wins was 7 -> 5 ->
+0 across these steps. Every case in this generator is *derived from a note's
+title or heading*, so once the lexical channel legitimately recognizes that
+identity, the vector channel can no longer flip a rank-1 on any of them. The
+gate `semantic_rank1_wins >= 1` is not satisfied by this case set anymore —
+not because the vector channel is dead weight (it still carries recall on
+zero-overlap queries, which is exactly what the production regression gate
+probes for), but because **a title-derived generator structurally cannot
+measure it.** The fix is a separate no-shared-term probe set (see Roadmap);
+loosening the gate without it would repeat the production sin of a number
+that looks like a guarantee.
 
 ## Shadow comparison
 

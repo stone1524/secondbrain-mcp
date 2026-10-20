@@ -57,14 +57,20 @@ def test_nested_private_directory_is_caught_at_any_depth() -> None:
     assert zone_of("30_Resources/95_private/leak.md") is Zone.PRIVATE
 
 
-def test_auxiliary_areas_are_indexed_but_not_default_results() -> None:
+def test_auxiliary_areas_are_indexed_and_in_default_scope() -> None:
+    """90_Agent used to be excluded from default results. On the live vault that
+    was 19 of 44 documents — including the densest technical note — so a rule
+    meant to keep ops noise out was hiding the answers."""
     assert zone_of("90_Agent/research/x.md") is Zone.AUXILIARY
     assert index_decision("90_Agent/research/x.md") is IndexDecision.INDEX
-    assert in_default_scope("90_Agent/research/x.md") is False
+    assert in_default_scope("90_Agent/research/x.md") is True
 
 
-def test_explicit_prefix_reenables_auxiliary_but_never_private() -> None:
+def test_explicit_prefix_never_reaches_private_but_folds_case() -> None:
     assert scope_prefixes_allows("90_Agent/research/x.md", ["90_Agent"]) is True
+    # Prefix matching folds case, like every other path decision in the system.
+    assert scope_prefixes_allows("90_Agent/research/x.md", ["90_agent"]) is True
+    assert scope_prefixes_allows("10_Notes/a.md", ["10_notes/"]) is True
     # No prefix list can reach the private zone.
     assert scope_prefixes_allows("95_Private/x.md", ["95_Private", ""]) is False
     assert scope_prefixes_allows("95_private/x.md", ["95_private"]) is False

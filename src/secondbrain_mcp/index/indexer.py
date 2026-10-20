@@ -24,10 +24,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..core.policy import IndexDecision, NotePath, index_decision
+from ..core.policy import IndexDecision, NotePath, Zone, index_decision
 from .embed import Embedder, LexicalOnlyEmbedder
 from .schema import bump_generation, get_meta, initialize, set_meta
-from .text import chunk_note, term_frequencies, tokenize
+from .text import chunk_note
 
 MARKDOWN_SUFFIX = ".md"
 
@@ -98,13 +98,13 @@ class Indexer:
     def has_semantic_backend(self) -> bool:
         return not isinstance(self.embedder, LexicalOnlyEmbedder)
 
-    def rebuild(self, *, force: bool = False) -> IndexReport:
+    def rebuild(self, *, force: bool = False, include_archive: bool = False) -> IndexReport:
         connection = initialize(self.db_path, force=force)
         report = IndexReport()
         try:
             self._reconcile_model(connection, report)
             visited: set[str] = set()
-            pending = self._scan(connection, report, visited, force=force)
+            pending = self._scan(connection, report, visited, force=force, include_archive=include_archive)
             for item in pending:
                 self._write_one(connection, item, report)
             report.deactivated = self._deactivate_vanished(connection, visited)
@@ -138,6 +138,7 @@ class Indexer:
         visited: set[str],
         *,
         force: bool = False,
+        include_archive: bool = False,
     ) -> list[dict]:
         pending: list[dict] = []
         for file in _walk(self.vault_root):
@@ -148,8 +149,15 @@ class Indexer:
                 continue
             decision = index_decision(note.key)
             if decision is IndexDecision.SKIP:
-                report.skipped += 1
-                continue
+                # The archive is skipped because it is history, but a caller
+                # that asked for it must get real hits. Indexed lexically only:
+                # 860 machine-written session artifacts are not worth embedding,
+                # and keyword matching already answers "what did I decide about
+                # X back then".
+                if not (include_archive and note.zone is Zone.ARCHIVE):
+                    report.skipped += 1
+                    continue
+                decision = IndexDecision.LEXICAL_ONLY
             try:
                 payload = file.read_bytes()
             except FileNotFoundError:
@@ -206,27 +214,31 @@ class Indexer:
 
     def _write_one(self, connection: sqlite3.Connection, item: dict, report: IndexReport) -> None:
         rel = item["rel"]
-        chunks = chunk_note(item["content"])
+        chunks = chunk_note(item["content"], filename=Path(rel).stem)
         self._delete_document_rows(connection, rel)
 
         inserted: list[tuple[str, str]] = []
         for chunk in chunks:
             chunk_id = _chunk_id(rel, chunk.ordinal)
             connection.execute(
-                "INSERT INTO chunks(id, path, heading, ordinal, content, token_count,"
-                " body_chars, active) VALUES(?, ?, ?, ?, ?, ?, ?, 1)",
+                "INSERT INTO chunks(id, path, heading, title, ordinal, content,"
+                " token_count, body_chars, active) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 1)",
                 (
                     chunk_id,
                     rel,
                     chunk.heading,
+                    chunk.title,
                     chunk.ordinal,
                     chunk.content,
                     chunk.token_count,
                     chunk.body_chars,
                 ),
             )
-            tokens = tokenize(f"{chunk.heading}\n{chunk.content}")
-            for term, frequency in term_frequencies(tokens).items():
+            # Postings come from the chunk's own tokenization. Re-deriving tokens
+            # from (heading, content) here dropped the document title — the title
+            # of an H1-over-H2 note lives in neither field — so the note stayed
+            # unfindable by its own name even though its token_count counted it.
+            for term, frequency in chunk.term_frequencies:
                 connection.execute(
                     "INSERT INTO postings(chunk_id, term, tf) VALUES(?, ?, ?)",
                     (chunk_id, term, frequency),
@@ -352,5 +364,8 @@ def index_vault(
     *,
     embedder: Embedder | None = None,
     force: bool = False,
+    include_archive: bool = False,
 ) -> IndexReport:
-    return Indexer(vault_root, db_path, embedder=embedder).rebuild(force=force)
+    return Indexer(vault_root, db_path, embedder=embedder).rebuild(
+        force=force, include_archive=include_archive
+    )

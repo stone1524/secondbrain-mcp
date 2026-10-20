@@ -84,7 +84,9 @@ def index_decision(rel: str) -> IndexDecision:
     if zone is Zone.PRIVATE:
         return IndexDecision.SKIP
     # Archive content is history, not live knowledge: hundreds of machine-written
-    # session artifacts would out-rank real notes on workflow-ish keywords.
+    # session artifacts would out-rank real notes on workflow-ish keywords. It is
+    # skipped at index time, which is also why `include_archive` can only work if
+    # the archive is indexed — see `archive_scope_requested` below.
     if zone is Zone.ARCHIVE:
         return IndexDecision.SKIP
     if zone is Zone.GENERATED:
@@ -98,19 +100,48 @@ def index_decision(rel: str) -> IndexDecision:
 
 
 def in_default_scope(rel: str) -> bool:
-    """Auxiliary areas are searchable only when the caller narrows into them."""
-    return zone_of(rel) in (Zone.STANDARD, Zone.LEXICAL_ONLY)
+    """Everything indexed is a default answer except the archive.
+
+    ``90_Agent`` used to sit here as AUXILIARY — indexed, but excluded from
+    default results. On the live vault that was 19 of 44 documents (41% of the
+    corpus), including the densest technical note in the system: the RAG pilot
+    report. A rule meant to keep ops noise out of ordinary answers was hiding
+    the answers. The archive is the only zone that still needs an explicit ask,
+    because it is history rather than current knowledge.
+    """
+    return zone_of(rel) in (Zone.STANDARD, Zone.LEXICAL_ONLY, Zone.AUXILIARY)
+
+
+def archive_scope_requested(prefixes: list[str] | None = None, *, include_archive: bool = False) -> bool:
+    """Whether the caller asked for archived content."""
+    if include_archive:
+        return True
+    for prefix in prefixes or []:
+        if _normalize(prefix).startswith("98_archive"):
+            return True
+    return False
 
 
 def scope_prefixes_allows(rel: str, prefixes: list[str]) -> bool:
-    """Explicit prefixes re-enable auxiliary areas; they never re-enable private."""
+    """Explicit prefixes re-enable auxiliary areas; they never re-enable private.
+
+    Prefix matching is case-insensitive for the same reason every other path
+    decision is: on Windows ``90_agent`` and ``90_Agent`` are one directory, so
+    a case-sensitive comparison produced a silent zero-hit query while
+    ``zone_of`` folded the same string. Two casings in one system is a defect
+    even when neither is wrong on its own.
+    """
     if not read_allowed(rel):
         return False
     if not prefixes:
         return in_default_scope(rel)
-    normalized = [prefix.replace("\\", "/").strip("/") for prefix in prefixes]
-    for prefix in normalized:
-        if prefix == "" or rel == prefix or rel.startswith(prefix + "/"):
+    # Forward slashes and casefold, never `NotePath.fold`: on Windows that
+    # helper applies `normcase`, which turns "/" into "\" and would make a
+    # prefix comparison fail on the separator rather than the casing.
+    folded_rel = _normalize(rel)
+    for prefix in prefixes:
+        folded = _normalize(prefix)
+        if folded in ("", ".") or folded_rel == folded or folded_rel.startswith(folded + "/"):
             return True
     return False
 

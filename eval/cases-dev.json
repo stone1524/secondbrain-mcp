@@ -221,6 +221,9 @@
     "query": "结论",
     "expected": [
       "90_Agent/research/2026-02-retrieval-pilot.md"
+    ],
+    "paths": [
+      "90_Agent"
     ]
   }
 ]

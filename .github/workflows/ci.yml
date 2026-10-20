@@ -24,3 +24,15 @@ jobs:
         run: ruff check .
       - name: Test
         run: pytest -q
+      # The retrieval gates used to run nowhere: CI stopped at pytest, the
+      # health check never touched eval/, so a change that broke recall or
+      # leaked the private zone into the index merged green. The demo vault is
+      # synthetic and self-contained, so this needs no model cache — the gates
+      # run lexical-only, and the semantic gate reports as not-applicable
+      # rather than passing silently.
+      - name: Build the demo index
+        run: python -m secondbrain_mcp.adapters.cli --vault demo-vault index
+      - name: Retrieval gates
+        run: python -m secondbrain_mcp.eval.run --cases eval/cases-dev.json --report eval-report.json
+      - name: Deployment contract
+        run: python -m secondbrain_mcp.adapters.healthcheck

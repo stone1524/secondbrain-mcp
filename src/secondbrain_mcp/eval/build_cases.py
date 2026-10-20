@@ -26,6 +26,8 @@ import re
 import sys
 from pathlib import Path
 
+from ..core.policy import in_default_scope
+
 SKIP_PREFIXES = ("95_Private", "98_Archive", ".obsidian", "30_Resources/FileIndex", "40_Persona/Model")
 
 
@@ -67,14 +69,20 @@ def build(vault: Path, *, per_category: int = 6) -> list[dict]:
                 return
             if any(case["query"] == query for case in cases):
                 return
-            cases.append(
-                {
-                    "id": f"{category}-{len(cases):03d}",
-                    "category": category,
-                    "query": query,
-                    "expected": [target],
-                }
-            )
+            case: dict = {
+                "id": f"{category}-{len(cases):03d}",
+                "category": category,
+                "query": query,
+                "expected": [target],
+            }
+            # Auxiliary areas (90_Agent) are out of default search scope by
+            # design. A case targeting one without a `paths` narrowing can
+            # never be answered by any retrieval configuration — the same
+            # "gate that cannot fail, backwards" defect the old evaluator had.
+            if not in_default_scope(target):
+                top = target.split("/", 1)[0]
+                case["paths"] = [top]
+            cases.append(case)
 
         add("keyword", title)
         if headings:

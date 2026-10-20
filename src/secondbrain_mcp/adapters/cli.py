@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from ..core.config import ConfigError, load_settings
 from .mcp_stdio import build_registry, dispatch, tool_manifest
@@ -34,6 +35,16 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("tools", help="Print the tool manifest as JSON")
     queue_parser = sub.add_parser("review", help="List items awaiting a human decision")
     queue_parser.add_argument("--limit", type=int, default=50)
+    eval_parser = sub.add_parser(
+        "eval",
+        help="Build cases from the vault and score retrieval (recall@5 gates)",
+    )
+    eval_parser.add_argument(
+        "--semantic",
+        action="store_true",
+        help="Enable the embedding backend (slower; model cache required)",
+    )
+    eval_parser.add_argument("--out", default="", help="Write the JSON report here")
 
     args = parser.parse_args(argv)
     try:
@@ -45,6 +56,27 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "index":
         payload = dispatch("index_rebuild", {"force": args.force}, tools)
+    elif args.command == "eval":
+        # The nightly quality stage: build cases from the vault, score them
+        # against the serving index, print the four gates. Delegates to the
+        # harness so the CLI and the documented `python -m ...eval.run` path
+        # can never disagree about what "passed" means.
+        import tempfile
+        from contextlib import ExitStack
+
+        from ..eval.build_cases import build
+        from ..eval.run import main as eval_main
+
+        cases = build(settings.vault_root)
+        with ExitStack() as stack:
+            workdir = Path(stack.enter_context(tempfile.TemporaryDirectory()))
+            cases_path = workdir / "cases.json"
+            cases_path.write_text(json.dumps(cases, ensure_ascii=False), encoding="utf-8")
+            report_path = Path(args.out) if args.out else workdir / "report.json"
+            argv = ["--cases", str(cases_path), "--report", str(report_path)]
+            if args.semantic:
+                argv.append("--semantic")
+            return eval_main(argv)
     elif args.command == "search":
         prefixes = [part for part in args.paths.split(";") if part]
         payload = dispatch(

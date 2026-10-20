@@ -37,6 +37,8 @@ index.db
 index.db-*
 *.db-wal
 *.db-shm
+# 本地运行 demo vault 时产生的状态目录（索引 + 锁历史）
+demo-vault/.secondbrain/
 
 # 本地评测产物（由真实语料派生，不入库）
 eval/*.json

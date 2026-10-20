@@ -14,12 +14,16 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from ..core.errors import GatewayError, InvalidArguments
+from ..core.locking import FileLock, LockConflictError
 from ..core.policy import NotePath, VaultPathError
 from ..index.embed import Embedder
 from ..index.indexer import Indexer
+from ..index.schema import SCHEMA_VERSION, connect, get_meta
 from ..index.schema import status as index_status
 from ..index.searcher import Query, Searcher
 from ..services.archive import ArchiveService
@@ -35,6 +39,144 @@ class ToolSpec:
     handler: Callable[..., Any]
 
 
+def _index_is_stale(db_path, vault_root) -> bool:
+    """A database whose tables the read path would drop, or whose documents are
+    indexed but no longer resolve, is not answerable — the schema version lives
+    inside `initialize()`, which DROPs on mismatch. Detection therefore reads
+    raw, through `connect()` only, so checking can never destroy.
+
+    This is the restart trap: schema mismatch -> first *read-only* search
+    silently wipes the index and returns empty forever, because nothing else
+    re-invokes the indexer. The registry closes that loop lazily.
+
+    A dirty marker covers the write path: every gateway mutation drops
+    ``index-dirty`` beside the database, so the next search rebuilds instead of
+    answering from the pre-write state. Without it a note created a second ago
+    was reported as ``no_match_in_scope`` — which reads as "you never wrote
+    this", a wrong answer rather than a missing one. The check is one
+    ``exists()`` per query, and the rebuild is incremental, so only the changed
+    notes are re-processed.
+    """
+    if _dirty_marker(db_path).exists():
+        return True
+    try:
+        connection = connect(db_path)
+    except Exception:  # noqa: BLE001 - unreadable database is "stale", rebuilt
+        return True
+    try:
+        tables = {
+            row["name"]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        if "documents" not in tables:
+            return True  # empty or pre-schema file: initialize() may DROP
+        version = get_meta(connection, "schema_version")
+        if version is None:
+            return True
+        if int(version) != SCHEMA_VERSION:
+            return True  # initialize() would DROP and rebuild
+        active = connection.execute(
+            "SELECT COUNT(*) AS n FROM documents WHERE active = 1"
+        ).fetchone()["n"]
+        if active == 0:
+            return True  # nothing indexed yet
+        # Wrong-vault guard: if every indexed path has left the disk, the
+        # database describes a different root and must be rebuilt.
+        # (Partial churn is what the dirty marker and the periodic rebuild are
+        # for — not a per-query disk scan.)
+        paths = [
+            row["path"]
+            for row in connection.execute(
+                "SELECT path FROM documents WHERE active = 1 LIMIT 50"
+            ).fetchall()
+        ]
+        return bool(paths) and not any((vault_root / path).exists() for path in paths)
+    except Exception:  # noqa: BLE001 - an index we cannot inspect counts as stale; the rebuild is the recovery
+        return True
+    finally:
+        connection.close()
+
+
+def _dirty_marker(db_path) -> Path:
+    return Path(db_path).parent / "index-dirty"
+
+
+def _mark_index_dirty(db_path) -> None:
+    """Record that the vault changed since the last index pass.
+
+    Best-effort: failing to write the marker must never fail the mutation that
+    succeeded, so the error is swallowed deliberately — the nightly rebuild is
+    the backstop.
+    """
+    marker = _dirty_marker(db_path)
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(datetime.now(timezone.utc).isoformat(), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _ensure_index(indexer: Indexer, lock_dir, *, include_archive: bool = False) -> str | None:
+    """Rebuild in place when the index cannot answer. Returns a note for the
+    caller to surface, or None when nothing happened.
+
+    A lock keeps N client processes from rebuilding simultaneously; the loser
+    does not block — a schema-reconciled database is already good enough to
+    answer with. Embedding may be slow (seconds per note); that is paid once
+    per restart, in the first query, instead of the index being silently dead.
+
+    ``include_archive`` indexes the archive lexically on that call. The archive
+    is skipped by default (it is history), so a caller asking for it needs rows
+    that were never written; without this the flag was accepted and always
+    returned nothing.
+    """
+    if not _index_is_stale(indexer.db_path, indexer.vault_root) and not (
+        include_archive and not _archive_indexed(indexer.db_path)
+    ):
+        return None
+    try:
+        with FileLock(lock_dir, indexer.db_path, relative_name="index-rebuild"):
+            # Re-check under the lock: a sibling process may have just rebuilt.
+            if _index_is_stale(indexer.db_path, indexer.vault_root) or (
+                include_archive and not _archive_indexed(indexer.db_path)
+            ):
+                indexer.rebuild(include_archive=include_archive)
+                _mark_index_clean(indexer.db_path)
+    except LockConflictError:
+        return "index rebuild is running in another process; results may be partial"
+    except Exception as error:  # noqa: BLE001 - a failed rebuild must not kill the read
+        return f"lazy index rebuild failed: {error}; results may be missing"
+    return "index was stale (schema mismatch, empty, or written to); rebuilt automatically"
+
+
+def _archive_indexed(db_path) -> bool:
+    """Whether any archive document is present in the index."""
+    try:
+        connection = connect(db_path)
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        row = connection.execute(
+            "SELECT COUNT(*) AS n FROM documents WHERE active = 1"
+            " AND lower(path) LIKE '98_archive/%'"
+        ).fetchone()
+        return bool(row["n"])
+    except Exception:  # noqa: BLE001
+        return False
+    finally:
+        connection.close()
+
+
+def _mark_index_clean(db_path) -> None:
+    marker = _dirty_marker(db_path)
+    try:
+        marker.unlink()
+    except OSError:
+        pass
+
+
 def build_tools(
     *,
     notes: NoteService,
@@ -43,6 +185,7 @@ def build_tools(
     indexer: Indexer,
     searcher: Searcher,
     embedder: Embedder,
+    lock_dir=None,
 ) -> dict[str, ToolSpec]:
     def search(
         query: str,
@@ -51,6 +194,10 @@ def build_tools(
         paths: list[str] | None = None,
         include_archive: bool = False,
     ) -> dict:
+        if lock_dir is not None:
+            note = _ensure_index(indexer, lock_dir, include_archive=include_archive)
+        else:
+            note = None
         prefixes = tuple(paths or ())
         hits, diagnostics = searcher.search(
             Query(
@@ -72,6 +219,8 @@ def build_tools(
             "diagnostics": diagnostics.as_dict(),
             "requires_note_read_for_full_evidence": True,
         }
+        if note:
+            payload["index_note"] = note
         if not hits:
             payload["empty_reason"] = _empty_reason(
                 diagnostics, prefixes, include_archive
@@ -80,7 +229,40 @@ def build_tools(
 
     def index_rebuild(force: bool = False) -> dict:
         report = indexer.rebuild(force=force)
+        _mark_index_clean(indexer.db_path)
         return report.as_dict()
+
+    def index_status_tool() -> dict:
+        payload = dict(index_status(indexer.db_path))
+        if lock_dir is not None:
+            note = _ensure_index(indexer, lock_dir)
+            if note:
+                payload["index_note"] = note
+                payload.update(index_status(indexer.db_path))
+        return payload
+
+    def tracking(write: bool):
+        """Call a mutation and mark the index dirty, so the next search rebuilds.
+
+        Applied at registration rather than inside each service: the write
+        services must not know the index exists, and a new mutating tool added
+        later inherits the behaviour by being registered with write=True.
+        """
+
+        def wrap(handler):
+            if not write:
+                return handler
+
+            def tracked(*args, **kwargs):
+                result = handler(*args, **kwargs)
+                _mark_index_dirty(indexer.db_path)
+                return result
+
+            return tracked
+
+        return wrap
+
+    mutating = tracking(True)
 
     specs = [
         ToolSpec(
@@ -121,9 +303,9 @@ def build_tools(
         ToolSpec(
             "search",
             "Search the index. mode=hybrid fuses keyword and semantic ranking; "
-            "mode=lexical uses keyword ranking only. Agent-ops notes and file stubs "
-            "are excluded from default results unless their prefix is passed in "
-            "paths. Archive content is never searched unless include_archive is set.",
+            "mode=lexical uses keyword ranking only. Everything indexed is in "
+            "scope by default, including agent-ops notes (90_Agent) and file "
+            "stubs. Archived history is excluded unless include_archive is set.",
             {
                 "type": "object",
                 "properties": {
@@ -143,7 +325,7 @@ def build_tools(
             "non-zero null_embedding_chunks means embedding failed and the next "
             "index_rebuild will retry it.",
             {"type": "object", "properties": {}},
-            lambda: index_status(indexer.db_path),
+            index_status_tool,
         ),
         ToolSpec(
             "index_rebuild",
@@ -172,8 +354,10 @@ def build_tools(
         ),
         ToolSpec(
             "note_create",
-            "Create a note in an inbox folder. Never overwrites: a name collision "
-            "gets a numeric suffix instead of failing.",
+            "Create a note in an inbox folder. A name collision gets a numeric "
+            "suffix instead of failing. overwrite=true replaces an existing note "
+            "and therefore requires expected_hash from note_read, re-verified "
+            "under the lock.",
             {
                 "type": "object",
                 "properties": {
@@ -181,11 +365,18 @@ def build_tools(
                     "filename": {"type": "string"},
                     "content": {"type": "string"},
                     "overwrite": {"type": "boolean"},
+                    "expected_hash": {"type": "string"},
                 },
                 "required": ["folder", "filename", "content"],
             },
-            lambda folder, filename, content, overwrite=False: notes.create(
-                folder=folder, filename=filename, content=content, overwrite=overwrite
+            mutating(
+                lambda folder, filename, content, overwrite=False, expected_hash=None: notes.create(
+                    folder=folder,
+                    filename=filename,
+                    content=content,
+                    overwrite=overwrite,
+                    expected_hash=expected_hash,
+                )
             ),
         ),
         ToolSpec(
@@ -201,8 +392,10 @@ def build_tools(
                 },
                 "required": ["note", "content", "expected_hash"],
             },
-            lambda note, content, expected_hash=None: notes.append(
-                note, content, expected_hash=expected_hash
+            mutating(
+                lambda note, content, expected_hash=None: notes.append(
+                    note, content, expected_hash=expected_hash
+                )
             ),
         ),
         ToolSpec(
@@ -226,13 +419,15 @@ def build_tools(
                 },
                 "required": ["note", "expected_hash", "operation", "target", "content"],
             },
-            lambda note, expected_hash, operation, target, content, preview=True: notes.patch(
-                note,
-                expected_hash=expected_hash,
-                operation=operation,
-                target=target,
-                content=content,
-                preview=preview,
+            mutating(
+                lambda note, expected_hash, operation, target, content, preview=True: notes.patch(
+                    note,
+                    expected_hash=expected_hash,
+                    operation=operation,
+                    target=target,
+                    content=content,
+                    preview=preview,
+                )
             ),
         ),
         ToolSpec(
@@ -247,8 +442,10 @@ def build_tools(
                 },
                 "required": ["note", "fields", "expected_hash"],
             },
-            lambda note, fields, expected_hash=None: notes.metadata(
-                note, fields, expected_hash=expected_hash
+            mutating(
+                lambda note, fields, expected_hash=None: notes.metadata(
+                    note, fields, expected_hash=expected_hash
+                )
             ),
         ),
         ToolSpec(
@@ -264,14 +461,17 @@ def build_tools(
                 },
                 "required": ["note", "destination", "expected_hash"],
             },
-            lambda note, destination, expected_hash=None: notes.move(
-                note, destination, expected_hash=expected_hash
+            mutating(
+                lambda note, destination, expected_hash=None: notes.move(
+                    note, destination, expected_hash=expected_hash
+                )
             ),
         ),
         ToolSpec(
             "archive",
             "Archive notes into the archive directory with a rollback manifest. "
-            "Run with dry_run=true first.",
+            "hash is mandatory for every note: call note_read first and pass the "
+            "hash it returns. Run with dry_run=true first.",
             {
                 "type": "object",
                 "properties": {
@@ -284,14 +484,14 @@ def build_tools(
                                 "hash": {"type": "string"},
                                 "category": {"type": "string"},
                             },
-                            "required": ["note"],
+                            "required": ["note", "hash"],
                         },
                     },
                     "dry_run": {"type": "boolean"},
                 },
                 "required": ["notes"],
             },
-            lambda notes, dry_run=False: archive.archive(notes, dry_run=dry_run),
+            mutating(lambda notes, dry_run=False: archive.archive(notes, dry_run=dry_run)),
         ),
         ToolSpec(
             "restore",
@@ -305,8 +505,10 @@ def build_tools(
                     "only": {"type": "string"},
                 },
             },
-            lambda batch_id="latest", dry_run=False, only=None: archive.restore(
-                batch_id, dry_run=dry_run, only=only
+            mutating(
+                lambda batch_id="latest", dry_run=False, only=None: archive.restore(
+                    batch_id, dry_run=dry_run, only=only
+                )
             ),
         ),
     ]
@@ -323,8 +525,8 @@ def _empty_reason(diagnostics, prefixes: tuple[str, ...], include_archive: bool)
         plain = "No keyword or semantic matches cleared the relevance gates."
     if not prefixes and not include_archive:
         plain += (
-            " Agent-ops notes (90_Agent), file stubs (30_Resources/FileIndex) and the "
-            "archive (98_Archive) were outside the scope of this query."
+            " Archived history (98_Archive) was outside the scope of this query; "
+            "pass include_archive=true to search it."
         )
     return {
         "reason": "no_match_in_scope",
@@ -335,8 +537,8 @@ def _empty_reason(diagnostics, prefixes: tuple[str, ...], include_archive: bool)
         },
         "suggestions": [
             "Broaden the query wording",
-            "Pass paths=['90_Agent'] to include agent-ops notes",
             "Pass include_archive=true to search archived history",
+            "Check index_status() if the note was created very recently",
         ],
     }
 

@@ -49,6 +49,8 @@ def build_registry(settings: Settings | None = None) -> tuple[dict[str, ToolSpec
         root=settings.vault_root,
         audit=audit,
         archive_dirname=settings.archive_dirname,
+        lock_dir=settings.lock_dir,
+        stale_lock_seconds=settings.stale_lock_seconds,
     )
     review = ReviewService(root=settings.vault_root)
     indexer = Indexer(settings.vault_root, settings.rag_db, embedder=embedder)
@@ -70,6 +72,7 @@ def build_registry(settings: Settings | None = None) -> tuple[dict[str, ToolSpec
             indexer=indexer,
             searcher=searcher,
             embedder=embedder,
+            lock_dir=settings.lock_dir,
         ),
         settings,
     )

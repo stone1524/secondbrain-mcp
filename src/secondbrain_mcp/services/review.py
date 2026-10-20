@@ -68,7 +68,16 @@ class ReviewService:
                 "summary": match.group(1).strip(),
                 "source": PERSONA_CANDIDATES,
                 "age_days": age,
-                "action": "Confirm or reject via personality tools",
+                # The action must name a tool that exists. The previous text
+                # pointed at "personality tools" the Python core never
+                # implemented, so the two oldest decisions in the vault had no
+                # way to be resolved by any caller — visible, and permanently
+                # stuck.
+                "action": (
+                    "Decide, then record it with note_patch on "
+                    f"{PERSONA_CANDIDATES} (tick the checkbox), passing "
+                    "expected_hash from note_read"
+                ),
             }
             for match in PENDING_MARKER.finditer(content)
         ]

@@ -87,6 +87,41 @@ def test_cjk_is_tokenized_into_bigrams() -> None:
     assert "每月" in tokens and "月检" in tokens and "检视" in tokens
 
 
+def test_mixed_script_term_splits_into_runs() -> None:
+    """`Watering的内容` must index as Latin `watering` plus CJK bigrams. Left
+    whole, it matches nothing on the document side — every document token is one
+    script — and the most common query shape in a bilingual vault
+    (English title wrapped in Chinese filler) is lexically dead."""
+    tokens = tokenize("关于Watering Schedule的内容")
+    assert "watering" in tokens
+    assert "schedule" in tokens
+    assert "内容" in tokens
+    assert "关于" in tokens
+    # and the document side produces the same Latin terms
+    doc_tokens = tokenize("Watering Schedule")
+    assert "watering" in doc_tokens and "schedule" in doc_tokens
+
+
+def test_hyphenated_term_matches_spaced_query() -> None:
+    """A file named 01-end-to-end.md queried as '01 end to end' shares no
+    single term: one side is hyphen-joined, the other is words. The hyphen
+    segments must be indexed alongside the whole."""
+    doc_tokens = tokenize("end-to-end")
+    query_tokens = tokenize("end to end")
+    assert {"end", "to"} <= set(doc_tokens)
+    assert {"end", "to"} <= set(query_tokens)
+
+
+def test_filename_stem_joins_the_indexed_surface() -> None:
+    """Users name notes first and type those names into search second. A note
+    whose H1 is Chinese and whose *file stem* is English was unfindable by the
+    English name — the stem must contribute terms like the title does."""
+    chunks = chunk_note("# PCB 设计标准\n\n正文内容若干若干。\n", filename="00-index")
+    assert chunks
+    assert "index" in chunks[0].tokens
+    assert "00" in chunks[0].tokens
+
+
 def test_heading_only_note_still_yields_a_chunk() -> None:
     """Production produced zero chunks here, so the note was invisible *and*
     re-indexed on every single run."""
@@ -103,6 +138,18 @@ def test_frontmatter_only_note_does_not_vanish() -> None:
 def test_body_length_ignores_frontmatter() -> None:
     assert body_length("---\ntype: x\n---\n") == 0
     assert body_length("---\ntype: x\n---\nhello") == 5
+
+
+def test_chunk_tokens_include_the_document_title() -> None:
+    """The postings table is written from Chunk.tokens. If a consumer ever
+    re-tokenizes (heading, content) instead, an H1-over-H2 note loses its title
+    from the index again — the token_count would still include it, so nothing
+    downstream would notice."""
+    chunks = chunk_note("# 从开题到成品的端到端流程\n\n## 准备\n调研与选题的工作记录。\n")
+    assert chunks
+    for chunk in chunks:
+        assert "端到端" in chunk.tokens or "端到" in chunk.tokens or "到端" in chunk.tokens
+        assert set(dict(chunk.term_frequencies)) == set(chunk.tokens)
 
 
 # ---------- indexing ----------
@@ -207,6 +254,110 @@ def test_deleted_note_is_deactivated(tmp_path: Path) -> None:
 # ---------- retrieval ----------
 
 
+def test_title_holder_beats_cross_referencer(tmp_path: Path) -> None:
+    """The forensic pattern: a long meta-review that *quotes* a note's title
+    accumulated per-chunk BM25 and outranked the note that *is* that title.
+    A structural phrase match — the query equals the H1 or the file stem — is
+    identity evidence and must win the fusion regardless of what the body
+    contains or which channels the rival cleared."""
+    vault = tmp_path / "vault"
+    (vault / "10_Notes").mkdir(parents=True)
+    (vault / "90_Agent").mkdir()
+    (vault / "10_Notes" / "topic.md").write_text(
+        "# 项目周记\n\n每周记录一次进度与风险。\n", encoding="utf-8"
+    )
+    review = "\n\n".join(
+        f"## 第 {n} 节\n\n评审里引用了《项目周记》并展开讨论，这一段的正文相当长，"
+        "反复出现项目周记四个字以便累积词法得分，越写越长越好。"
+        for n in range(8)
+    )
+    (vault / "10_Notes" / "review.md").write_text(f"# 季度评审\n\n{review}\n", encoding="utf-8")
+    db = tmp_path / "index.db"
+    index_vault(vault, db)
+    hits, _ = Searcher(db).search(Query(text="项目周记"))
+    assert hits
+    assert hits[0].note == "10_Notes/topic.md", "the title holder must outrank the quoters"
+
+
+def test_wrapper_query_resolves_to_named_note(tmp_path: Path) -> None:
+    """「关于X的内容」/「那篇讲X的笔记」 are real user phrasings; the wrapper is
+    noise and X — the note's name — is the request. Stripping it recovers the
+    structural identity, which the whole-query phrase test missed."""
+    vault = tmp_path / "vault"
+    (vault / "10_Notes").mkdir(parents=True)
+    (vault / "10_Notes" / "water.md").write_text(
+        "# 浇水计划\n\n冬季每月浇一次，夏季每周一次。\n", encoding="utf-8"
+    )
+    (vault / "10_Notes" / "misc.md").write_text(
+        "# 园艺备忘\n\n备忘里写了一句关于浇水计划的内容需要确认。\n", encoding="utf-8"
+    )
+    db = tmp_path / "index.db"
+    index_vault(vault, db)
+    searcher = Searcher(db)
+    for query in ("关于浇水计划的内容", "那篇讲浇水计划的笔记"):
+        hits, _ = searcher.search(Query(text=query))
+        assert hits, query
+        assert hits[0].note == "10_Notes/water.md", query
+
+
+def test_substantive_note_not_stubbed_by_one_small_section(tmp_path: Path) -> None:
+    """The stub gate exists for persona files that are empty everywhere. A real
+    note whose *matched section* is tiny (proper_noun-007: a 61-char 背景) is
+    not a stub; the penalty must look at the note's total body, not the chunk."""
+    vault = tmp_path / "vault" / "10_Notes"
+    vault.mkdir(parents=True)
+    long_body = "这是一段足够长的正文内容用于让这篇笔记成为真实笔记而不是占位文件。" * 6
+    (vault / "resume.md").write_text(
+        f"# 简历\n\n## 背景\n\n教育经历。\n\n## 经历\n\n{long_body}\n", encoding="utf-8"
+    )
+    db = tmp_path / "index.db"
+    index_vault(vault.parent, db)
+    hits, _ = Searcher(db).search(Query(text="背景"))
+    assert hits
+    assert hits[0].note == "10_Notes/resume.md"
+    assert hits[0].score > 0.032, "a substantive note must not be halved by the stub gate"
+
+
+def test_fusion_tie_break_favors_lexical_evidence(tmp_path: Path) -> None:
+    """One RRF vote from either channel is exactly 1/61 — ties are not noise,
+    they are structural. When they happen, the note the query literally
+    contains must outrank the one that merely sits near the query in vector
+    space, even if the latter sorts first by path (00_Inbox beats 10_Notes)."""
+    from secondbrain_mcp.index.searcher import Hit
+
+    # direct unit of the sort key used in _fuse
+    hits = [
+        Hit(note="00_Inbox/ghost.md", heading=None, excerpt="", content_hash=None,
+            updated_at=None, score=1 / 61, lexical_score=0.0, semantic_score=0.6,
+            lexical_rank=None, semantic_rank=0, matched_terms=[]),
+        Hit(note="30_Resources/answer.md", heading=None, excerpt="", content_hash=None,
+            updated_at=None, score=1 / 61, lexical_score=12.0, semantic_score=0.0,
+            lexical_rank=0, semantic_rank=None, matched_terms=["workflow"]),
+    ]
+    hits.sort(key=lambda hit: (-hit.score, not hit.matched_terms, hit.note))
+    assert hits[0].note == "30_Resources/answer.md"
+
+
+def test_section_heading_query_wins_by_identity(tmp_path: Path) -> None:
+    """A proper-noun query that equals a section heading must rank that note
+    first: the heading is part of the note's identity surface. (Regression:
+    the first pass of the tiered rescue dropped headings.)"""
+    vault = tmp_path / "vault" / "10_Notes"
+    vault.mkdir(parents=True)
+    (vault / "diag.md").write_text(
+        "# 系统体检\n\n## 总诊断\n\n全部指标正常，无异常项需要跟进处理。\n\n"
+        "## 细节\n\n其他若干内容若干内容。\n", encoding="utf-8"
+    )
+    (vault / "other.md").write_text(
+        "# 周报\n\n本周完成了若干工作，其中提到总诊断一次带过而已。\n", encoding="utf-8"
+    )
+    db = tmp_path / "index.db"
+    index_vault(vault.parent, db)
+    hits, _ = Searcher(db).search(Query(text="总诊断"))
+    assert hits
+    assert hits[0].note == "10_Notes/diag.md"
+
+
 def test_keyword_query_finds_its_note(tmp_path: Path) -> None:
     _, db, _ = build(tmp_path)
     searcher = Searcher(db)
@@ -215,33 +366,78 @@ def test_keyword_query_finds_its_note(tmp_path: Path) -> None:
     assert hits[0].note == "40_Persona/Preferences/monthly-review.md"
 
 
-def test_auxiliary_notes_are_not_default_results(tmp_path: Path) -> None:
+def test_title_only_query_finds_the_note(tmp_path: Path) -> None:
+    """The production shape this system exists for: an H1 title over H2
+    sections. The title characters appear in no chunk body, so a query that is
+    just the note's own name must still resolve through the lexical channel —
+    it lives in the postings via Chunk.tokens."""
+    vault = tmp_path / "vault"
+    note = vault / "10_Notes" / "equipment.md"
+    note.parent.mkdir(parents=True)
+    note.write_text(
+        "# 设备清单\n\n## 厨房\n锅碗瓢盆和烤箱的使用记录。\n\n## 书房\n显示器支架的采购记录。\n",
+        encoding="utf-8",
+    )
+    db = tmp_path / "index.db"
+    index_vault(vault, db)
+    hits, _ = Searcher(db).search(Query(text="设备清单"))
+    assert hits, "a note must be findable by its own title"
+    assert hits[0].note == "10_Notes/equipment.md"
+
+
+def test_idf_stays_positive_and_multichunk_note_outranks_single_match(tmp_path: Path) -> None:
+    """df must count distinct documents, not posting rows. With a 3-chunk note
+    matching the term in every chunk, row-counted df exceeded N and the Robertson
+    idf went negative — the richest match sank to the bottom."""
+    vault = tmp_path / "vault" / "10_Notes"
+    vault.mkdir(parents=True)
+    (vault / "single.md").write_text(
+        "# Single\n\nalpha one body text body text body text\n", encoding="utf-8"
+    )
+    (vault / "multi.md").write_text(
+        "# Multi\n\nbeta and alpha section one body text body text\n\n"
+        "## Two\nbeta and alpha section two body text body text\n\n"
+        "## Three\nbeta and alpha section three body text body text\n",
+        encoding="utf-8",
+    )
+    db = tmp_path / "index.db"
+    index_vault(vault, db)
+    hits, _ = Searcher(db).search(Query(text="alpha"))
+    assert len(hits) == 2
+    assert all(hit.lexical_score > 0 for hit in hits), "idf must not go negative"
+
+
+def test_auxiliary_notes_are_default_results(tmp_path: Path) -> None:
+    """90_Agent is indexed knowledge, not noise: 41% of the live corpus sat
+    behind an exclusion that was meant for ops chatter."""
     _, db, _ = build(tmp_path)
     searcher = Searcher(db)
     hits, _ = searcher.search(Query(text="multilingual e5 pilot Recall"))
-    assert all(not hit.note.startswith("90_Agent/") for hit in hits)
+    assert any(hit.note.startswith("90_Agent/") for hit in hits)
 
 
-def test_explicit_prefix_reaches_auxiliary(tmp_path: Path) -> None:
+def test_explicit_prefix_reaches_auxiliary_case_insensitively(tmp_path: Path) -> None:
     _, db, _ = build(tmp_path)
     searcher = Searcher(db)
-    hits, _ = searcher.search(
-        Query(text="multilingual e5 pilot Recall", prefixes=("90_Agent",))
-    )
-    assert hits
-    assert hits[0].note.startswith("90_Agent/")
+    for spelling in ("90_Agent", "90_agent"):
+        hits, _ = searcher.search(
+            Query(text="multilingual e5 pilot Recall", prefixes=(spelling,))
+        )
+        assert hits, spelling
+        assert hits[0].note.startswith("90_Agent/")
 
 
 def test_archive_is_reachable_only_when_asked(tmp_path: Path) -> None:
-    _, db, _ = build(tmp_path)
+    """The archive used to be skipped at index time, so `include_archive` was a
+    flag that could never return anything — accepted, advertised, and always
+    empty. It is indexed lexically once the caller asks for it."""
+    vault, db, _ = build(tmp_path)
+    index_vault(vault, db, embedder=LexicalOnlyEmbedder(), include_archive=True)
     searcher = Searcher(db)
     default_hits, _ = searcher.search(Query(text="归档区 历史内容"))
     assert all(not hit.note.startswith("98_Archive") for hit in default_hits)
     asked_hits, _ = searcher.search(Query(text="归档区 历史内容", include_archive=True))
-    assert all(not hit.note.startswith("98_Archive") for hit in asked_hits)
-    # The archive is skipped at index time by policy; an explicit ask cannot
-    # manufacture hits for content that was never indexed, and must not leak the
-    # private zone either.
+    assert any(hit.note.startswith("98_Archive") for hit in asked_hits)
     assert all("95_Private" not in hit.note.lower() for hit in asked_hits)
 
 

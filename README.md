@@ -2,7 +2,7 @@
 
 > Local-first personal knowledge base as MCP: Markdown vault + hybrid RAG retrieval + a safety-first gateway with hash locks, audit trail, privacy zones and rollback — so that AI agents can *use* your knowledge base without being able to wreck it.
 
-> 状态：✅ **v0.2** —— 13 个工具 · 72 个测试（含真实 stdio 协议端到端）· 检索门禁全过 ｜ License: MIT
+> 状态：✅ **v0.2** —— 13 个工具 · 95 个测试（含真实 stdio 协议端到端）· 检索门禁全过 ｜ License: MIT
 
 ## 为什么做这个
 
@@ -25,6 +25,7 @@
 - [x] 隐私分区与待确认队列
 - [x] 合成演示知识库（demo vault，无任何真实个人内容）
 - [x] 单元测试 + 对抗性测试 + MCP stdio 端到端 + 可失败的检索门禁
+- [x] 部署健康检查（暂存库跑全契约 + live 索引只读快照探针）
 
 ## 文档
 
@@ -97,7 +98,7 @@ secondbrain-mcp          # 不设 SB_VAULT_ROOT 时默认服务 demo-vault/
 python -m secondbrain_mcp.eval.run --cases eval/cases-dev.json --semantic
 ```
 
-四道门禁：`recall@5 ≥ 0.85`、`semantic rank-1 wins ≥ 1`、`null vectors == 0`、`privacy leakage == 0`。
+五道门禁，每一道都能真的失败：`recall@5 ≥ 0.85`、`semantic rank-1 wins ≥ 1`（仅在 `--semantic` 下生效，词法模式报告为 not-applicable 而不是静默通过）、`null vectors == 0`、`privacy leakage == 0`（读侧四种拼写探测）、`index_side_leak == 0`（直接读库，抓读侧门禁看不见的入库泄漏）。CI 会先建 demo 索引，再跑门禁与部署契约检查。
 当前结果与旧系统的对照见 [docs/evaluation.md](docs/evaluation.md)。
 
 ## License
