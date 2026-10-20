@@ -254,6 +254,90 @@ def test_deleted_note_is_deactivated(tmp_path: Path) -> None:
 # ---------- retrieval ----------
 
 
+def test_title_holder_beats_cross_referencer(tmp_path: Path) -> None:
+    """The forensic pattern: a long meta-review that *quotes* a note's title
+    accumulated per-chunk BM25 and outranked the note that *is* that title.
+    A structural phrase match — the query equals the H1 or the file stem — is
+    identity evidence and must win the fusion regardless of what the body
+    contains or which channels the rival cleared."""
+    vault = tmp_path / "vault"
+    (vault / "10_Notes").mkdir(parents=True)
+    (vault / "90_Agent").mkdir()
+    (vault / "10_Notes" / "topic.md").write_text(
+        "# 项目周记\n\n每周记录一次进度与风险。\n", encoding="utf-8"
+    )
+    review = "\n\n".join(
+        f"## 第 {n} 节\n\n评审里引用了《项目周记》并展开讨论，这一段的正文相当长，"
+        "反复出现项目周记四个字以便累积词法得分，越写越长越好。"
+        for n in range(8)
+    )
+    (vault / "10_Notes" / "review.md").write_text(f"# 季度评审\n\n{review}\n", encoding="utf-8")
+    db = tmp_path / "index.db"
+    index_vault(vault, db)
+    hits, _ = Searcher(db).search(Query(text="项目周记"))
+    assert hits
+    assert hits[0].note == "10_Notes/topic.md", "the title holder must outrank the quoters"
+
+
+def test_wrapper_query_resolves_to_named_note(tmp_path: Path) -> None:
+    """「关于X的内容」/「那篇讲X的笔记」 are real user phrasings; the wrapper is
+    noise and X — the note's name — is the request. Stripping it recovers the
+    structural identity, which the whole-query phrase test missed."""
+    vault = tmp_path / "vault"
+    (vault / "10_Notes").mkdir(parents=True)
+    (vault / "10_Notes" / "water.md").write_text(
+        "# 浇水计划\n\n冬季每月浇一次，夏季每周一次。\n", encoding="utf-8"
+    )
+    (vault / "10_Notes" / "misc.md").write_text(
+        "# 园艺备忘\n\n备忘里写了一句关于浇水计划的内容需要确认。\n", encoding="utf-8"
+    )
+    db = tmp_path / "index.db"
+    index_vault(vault, db)
+    searcher = Searcher(db)
+    for query in ("关于浇水计划的内容", "那篇讲浇水计划的笔记"):
+        hits, _ = searcher.search(Query(text=query))
+        assert hits, query
+        assert hits[0].note == "10_Notes/water.md", query
+
+
+def test_substantive_note_not_stubbed_by_one_small_section(tmp_path: Path) -> None:
+    """The stub gate exists for persona files that are empty everywhere. A real
+    note whose *matched section* is tiny (proper_noun-007: a 61-char 背景) is
+    not a stub; the penalty must look at the note's total body, not the chunk."""
+    vault = tmp_path / "vault" / "10_Notes"
+    vault.mkdir(parents=True)
+    long_body = "这是一段足够长的正文内容用于让这篇笔记成为真实笔记而不是占位文件。" * 6
+    (vault / "resume.md").write_text(
+        f"# 简历\n\n## 背景\n\n教育经历。\n\n## 经历\n\n{long_body}\n", encoding="utf-8"
+    )
+    db = tmp_path / "index.db"
+    index_vault(vault.parent, db)
+    hits, _ = Searcher(db).search(Query(text="背景"))
+    assert hits
+    assert hits[0].note == "10_Notes/resume.md"
+    assert hits[0].score > 0.032, "a substantive note must not be halved by the stub gate"
+
+
+def test_section_heading_query_wins_by_identity(tmp_path: Path) -> None:
+    """A proper-noun query that equals a section heading must rank that note
+    first: the heading is part of the note's identity surface. (Regression:
+    the first pass of the tiered rescue dropped headings.)"""
+    vault = tmp_path / "vault" / "10_Notes"
+    vault.mkdir(parents=True)
+    (vault / "diag.md").write_text(
+        "# 系统体检\n\n## 总诊断\n\n全部指标正常，无异常项需要跟进处理。\n\n"
+        "## 细节\n\n其他若干内容若干内容。\n", encoding="utf-8"
+    )
+    (vault / "other.md").write_text(
+        "# 周报\n\n本周完成了若干工作，其中提到总诊断一次带过而已。\n", encoding="utf-8"
+    )
+    db = tmp_path / "index.db"
+    index_vault(vault.parent, db)
+    hits, _ = Searcher(db).search(Query(text="总诊断"))
+    assert hits
+    assert hits[0].note == "10_Notes/diag.md"
+
+
 def test_keyword_query_finds_its_note(tmp_path: Path) -> None:
     _, db, _ = build(tmp_path)
     searcher = Searcher(db)

@@ -9,8 +9,10 @@ Version 2 changed what a postings row *means* — script-split terms, document
 titles inside the term set, df per document — without changing any column. An
 index built under version 1 returns silently wrong rankings for every note the
 hash-check marks unchanged, so those rows must be rebuilt, not kept. Version 3
-widens the row's term set again: hyphen segments and the file stem join the
-index. Same trap, same cure.
+widened the row's term set again: hyphen segments and the file stem join the
+index. Same trap, same cure. Version 4 adds the document H1 as a `title` column
+on every chunk — the phrase rescue needs it stored as a field, not only folded
+into tokens — a new column the old tables lack.
 
 Two columns carry the fixes for observed production defects:
 
@@ -36,7 +38,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def connect(db_path: Path | str) -> sqlite3.Connection:
@@ -85,6 +87,7 @@ def initialize(db_path: Path | str, *, force: bool = False) -> sqlite3.Connectio
             id TEXT PRIMARY KEY,
             path TEXT NOT NULL,
             heading TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '',
             ordinal INTEGER NOT NULL,
             content TEXT NOT NULL,
             token_count INTEGER NOT NULL,

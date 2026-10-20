@@ -213,12 +213,13 @@ class Indexer:
         for chunk in chunks:
             chunk_id = _chunk_id(rel, chunk.ordinal)
             connection.execute(
-                "INSERT INTO chunks(id, path, heading, ordinal, content, token_count,"
-                " body_chars, active) VALUES(?, ?, ?, ?, ?, ?, ?, 1)",
+                "INSERT INTO chunks(id, path, heading, title, ordinal, content,"
+                " token_count, body_chars, active) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 1)",
                 (
                     chunk_id,
                     rel,
                     chunk.heading,
+                    chunk.title,
                     chunk.ordinal,
                     chunk.content,
                     chunk.token_count,

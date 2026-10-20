@@ -21,6 +21,7 @@ minimum token count, and a near-empty body is down-weighted.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +42,34 @@ BM25_K1 = 1.2
 BM25_B = 0.75
 PHRASE_BONUS = 0.5
 CANDIDATE_LIMIT = 200
+
+# Conversational wrappers users actually type around a note's name. Stripping
+# them recovers the *core* being asked for: 「关于X的内容」 and 「那篇讲X的笔记」
+# are X, and "what does my note say about X" is X. The forensic evidence: every
+# paraphrase/vague case lost rank-1 had its exact title inside such a wrapper,
+# while a long note that merely *mentions* the title won on raw accumulation.
+_QUERY_WRAPPERS = (
+    re.compile(r"^关于(?P<core>.+?)的(?:内容|记录|笔记|说明|介绍)$"),
+    re.compile(r"^那篇讲(?P<core>.+?)的笔记$"),
+    re.compile(r"^那篇(?P<core>.+?)的笔记$"),
+    re.compile(r"^what does my note say about (?P<core>.+)$", re.IGNORECASE),
+)
+
+
+def query_cores(text: str) -> list[str]:
+    """The query plus each wrapper-stripped variant, longest-first unchanged.
+
+    Kept as a module function so tests can pin the stripping table directly;
+    this is retrieval behavior, not per-call state."""
+    cores = [text]
+    stripped = text.strip()
+    for pattern in _QUERY_WRAPPERS:
+        match = pattern.match(stripped)
+        if match:
+            core = match.group("core").strip()
+            if core:
+                cores.append(core)
+    return cores
 
 
 @dataclass(slots=True)
@@ -153,7 +182,9 @@ class Searcher:
             gates: list[str] = []
             if semantic_enabled:
                 semantic, gates = self._apply_semantic_gates(semantic)
-            hits = self._fuse(lexical, semantic, scope, query)
+            hits = self._fuse(
+                lexical, semantic, scope, query, self._note_bodies(connection)
+            )
             reason = (
                 "explicit_prefixes"
                 if query.prefixes
@@ -203,7 +234,7 @@ class Searcher:
     ) -> list[dict]:
         placeholders = ",".join("?" for _ in tokens)
         rows = connection.execute(
-            "SELECT p.chunk_id, p.term, p.tf, c.path, c.heading, c.content,"
+            "SELECT p.chunk_id, p.term, p.tf, c.path, c.heading, c.title, c.content,"
             " c.token_count, c.body_chars, d.content_hash, d.updated_at"
             " FROM postings p"
             " JOIN chunks c ON c.id = p.chunk_id AND c.active = 1"
@@ -261,7 +292,24 @@ class Searcher:
         def phrase_key(value: str) -> str:
             return "".join(character for character in value.lower() if character.isalnum())
 
-        phrase_query = phrase_key(text)
+        # Stub detection must look at the *note*, not the matched section: the
+        # production attractor was a persona file that is empty everywhere. A
+        # substantive note with one small section (「背景」 at 61 chars) is not
+        # a stub, but the chunk-level test halved its won rank anyway.
+        note_bodies = self._note_bodies(connection)
+        full_key = phrase_key(text)
+        core_keys = [
+            phrase_key(core)
+            for core in query_cores(text)
+            if core != text and len(phrase_key(core)) >= 4
+        ]
+        # Per-document identity fields: the H1 title and the file stem — what
+        # the user *named*, not what a section happens to discuss. A long
+        # meta-review that quotes another note's title in its body has zero
+        # identity match; the note that is that title has one. The forensic
+        # pattern driving this split: a cross-referencing note won 6 of 11
+        # lost cases by accumulating per-chunk BM25 while the title-holder
+        # failed the old body-only phrase test.
         best: dict[str, dict] = {}
         for row in rows:
             if not allowed(row["path"]):
@@ -286,29 +334,57 @@ class Searcher:
                     "body_chars": int(row["body_chars"]),
                     "lexical": 0.0,
                     "matched": set(),
+                    "struct": {
+                        phrase_key(row["title"]),
+                        phrase_key(Path(row["path"]).stem),
+                        phrase_key(row["heading"] or ""),
+                    },
+                    "bodies": [],
+                    "note_body": 0,
                 }
                 best[row["path"]] = entry
             entry["lexical"] += float(score)
             entry["matched"].add(term)
+            entry["bodies"].append(row["content"])
+            entry["note_body"] = note_bodies.get(row["path"], entry["body_chars"])
 
         for entry in best.values():
             # BM25 is length-normalized, so a whole-title query against a long
-            # chunk can score below a short note sharing one token. An exact
-            # phrase hit is unambiguous evidence and must outrank that noise.
-            # The heading is part of the surface: a note titled with the query
-            # carries it in the heading, not in the body text.
-            surface = phrase_key(f"{entry['heading'] or ''}\n{entry['content']}")
-            entry["exact_phrase"] = bool(phrase_query) and phrase_query in surface
+            # chunk can score below a short note sharing one token. A phrase hit
+            # against a note's *name* is unambiguous evidence and must outrank
+            # that noise; a phrase hit inside body text is weaker evidence.
+            # Levels: 0 = whole query is (inside) the title/stem;
+            # 1 = wrapper-stripped core is; 2 = whole query appears in body.
+            struct = {key for key in entry["struct"] if key}
+            body_key = phrase_key(" ".join(entry["bodies"])[:8000])
+            level = 3
+            if full_key and full_key in struct:
+                level = 0
+            elif full_key and any(core in struct for core in core_keys):
+                level = 1
+            elif full_key and full_key in body_key:
+                level = 2
+            entry["phrase_level"] = level
+            entry["exact_phrase"] = level <= 1
 
         ranked = sorted(
             best.values(),
-            key=lambda item: (not item["exact_phrase"], -item["lexical"], item["note"]),
+            key=lambda item: (item["phrase_level"], -item["lexical"], item["note"]),
         )
         for rank, entry in enumerate(ranked):
             entry["lexical_rank"] = rank
         return ranked[:CANDIDATE_LIMIT]
 
     # ---------- semantic ----------
+
+    def _note_bodies(self, connection: sqlite3.Connection) -> dict[str, int]:
+        return {
+            row["path"]: int(row["n"])
+            for row in connection.execute(
+                "SELECT path, SUM(body_chars) AS n FROM chunks"
+                " WHERE active = 1 GROUP BY path"
+            ).fetchall()
+        }
 
     def _generation(self, connection: sqlite3.Connection) -> int:
         row = connection.execute(
@@ -419,6 +495,7 @@ class Searcher:
         semantic: list[dict],
         allowed,
         query: Query,
+        note_bodies: dict[str, int],
     ) -> list[Hit]:
         merged: dict[str, dict] = {}
 
@@ -438,6 +515,7 @@ class Searcher:
                     "matched": set(),
                     "token_count": 0,
                     "body_chars": 0,
+                    "phrase_level": 3,
                 }
                 merged[note] = entry
             return entry
@@ -453,6 +531,7 @@ class Searcher:
             target["updated_at"] = entry["updated_at"]
             target["token_count"] = entry["token_count"]
             target["body_chars"] = entry["body_chars"]
+            target["phrase_level"] = entry["phrase_level"]
 
         for entry in semantic[: self.rrf_depth]:
             target = slot(entry["note"])
@@ -473,7 +552,17 @@ class Searcher:
                 score += 1.0 / (self.rrf_k + entry["lexical_rank"] + 1)
             if entry["semantic_rank"] is not None:
                 score += 1.0 / (self.rrf_k + entry["semantic_rank"] + 1)
-            if entry["body_chars"] < self.stub_body_chars:
+            # The title match must survive RRF. Without this multiplier a
+            # wrapper query («关于X的内容») is won by any note clearing the
+            # semantic floor with a weak lexical hit — two votes beat the title
+            # holder's one, even against a BM25 of 2506. PHRASE_BONUS was defined
+            # in v0.2 but never applied; it is load-bearing here. A full
+            # two-channel score is 1/61 + 1/62 ≈ 0.0323; a structural-phrase
+            # hit must clear it from one channel: 0.0164 × (1 + 1.0) > 0.0323.
+            if entry["phrase_level"] <= 1:
+                score *= 1.0 + PHRASE_BONUS * 2
+            note_body = note_bodies.get(note, entry["body_chars"])
+            if note_body < self.stub_body_chars:
                 score *= self.stub_penalty
             hits.append(
                 Hit(

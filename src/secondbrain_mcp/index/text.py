@@ -39,6 +39,10 @@ class Chunk:
     body_chars: int
     tokens: tuple[str, ...]
     term_frequencies: tuple[tuple[str, int], ...]
+    title: str = ""
+    """The document H1, which is *not* part of heading/content. The phrase
+    rescue needs it: a note whose title is the query must be provable as the
+    title-holder from the stored row, not just from its token set."""
 
 
 def tokenize(text: str) -> list[str]:
@@ -129,6 +133,7 @@ def chunk_note(content: str, *, max_chars: int = 1800, filename: str = "") -> li
                 body_chars=len("".join(text.split())),
                 tokens=tokens,
                 term_frequencies=frequencies,
+                title=document_title,
             )
         )
         lines.clear()
@@ -165,6 +170,7 @@ def chunk_note(content: str, *, max_chars: int = 1800, filename: str = "") -> li
                     body_chars=len("".join(fallback.split())),
                     tokens=tokens,
                     term_frequencies=tuple(term_frequencies(list(tokens)).items()),
+                    title=document_title,
                 )
             )
     return chunks
