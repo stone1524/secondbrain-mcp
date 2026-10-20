@@ -373,7 +373,7 @@ class NoteService:
     def move(self, note: str, destination: str, *, expected_hash: str | None) -> dict:
         source = self._existing(note)
         self._require_hash(expected_hash, "note_move", source.rel)
-        target = self._parse(destination).assert_writable()
+        target = self._writable(destination)
         if target.absolute.exists():
             raise InvalidArguments(
                 "Destination already exists", "Choose a path that does not yet exist"
@@ -404,6 +404,20 @@ class NoteService:
             return NotePath.parse(self.root, note)
         except VaultPathError as error:
             raise PathDenied(str(error)) from error
+
+    def _writable(self, note: str) -> NotePath:
+        """Parse and prove the destination is writable. Parking a note inside
+        the private zone is the relocation half of the same boundary as reading
+        it: the refusal must carry the PRIVATE_DENY contract (and reach the
+        caller with a recovery), not escape as a raw PermissionError the SDK
+        flattens to 'Error executing tool'. The Node health check asserted this
+        (moveIntoPrivateDenied) against the gateway it retired."""
+        path = self._parse(note)
+        try:
+            path.assert_writable()
+        except PrivateNoteError as error:
+            raise PrivateDenied() from error
+        return path
 
     def _existing(self, note: str) -> NotePath:
         path = self._parse(note)

@@ -190,6 +190,90 @@ def test_private_read_is_refused_through_the_tool_boundary(tools) -> None:
         assert payload["error"]["code"] == "PRIVATE_DENY"
 
 
+# ---------- ported P0 security assertions (from the retired Node gateway) ----------
+
+
+@pytest.mark.parametrize("on_disk", ["95_Private", "95_private", "95_PRIVATE", "95_PrIvAtE"])
+def test_private_zone_denied_with_the_directory_spelled_any_way_on_disk(
+    tmp_path: Path, on_disk: str
+) -> None:
+    """The production bypass class: the rule compared case-sensitively, so a
+    directory spelled differently from the hardcoded prefix silently disabled
+    the private zone on Windows. The vault here has the directory *on disk* in
+    a non-canonical spelling; every read spelling must still deny, and the
+    listing must never enumerate it. (Node p0-security.test.mjs case 1.)"""
+    vault = tmp_path / "vault"
+    (vault / on_disk).mkdir(parents=True)
+    (vault / on_disk / "secret.md").write_text("PRIVATE-DO-NOT-LEAK\n", encoding="utf-8")
+    (vault / "00_Inbox/Web").mkdir(parents=True)
+    (vault / "00_Inbox/Web/public.md").write_text("# public\nhello\n", encoding="utf-8")
+    settings = Settings(
+        vault_root=vault.resolve(),
+        state_root=tmp_path / "state",
+        agent_label="test",
+        rag_db=tmp_path / "state" / "index.db",
+        audit_log=tmp_path / "state" / "logs" / "audit.jsonl",
+        lock_dir=tmp_path / "state" / "locks",
+    )
+    registry, _ = build_registry(settings)
+    for probe in ("95_Private/secret.md", "95_private/secret.md", "95_PRIVATE/secret.md", "95_PrIvAtE/secret.md"):
+        payload = dispatch("note_read", {"note": probe}, registry)
+        assert payload["isError"] is True, probe
+        assert "PRIVATE-DO-NOT-LEAK" not in json.dumps(payload, ensure_ascii=False)
+    listed = dispatch("note_list", {}, registry)
+    assert "secret.md" not in json.dumps(listed, ensure_ascii=False)
+
+
+def test_obsidian_config_is_never_enumerated(tmp_path: Path) -> None:
+    """.Obsidian holds editor config; the walk must skip it whatever the casing.
+    (Node p0-security.test.mjs case 2.)"""
+    vault = tmp_path / "vault" / "10_Notes"
+    vault.mkdir(parents=True)
+    (tmp_path / "vault" / ".Obsidian").mkdir()
+    (tmp_path / "vault" / ".Obsidian" / "leak.json.md").write_text("{}", encoding="utf-8")
+    (vault / "ok.md").write_text("# ok\ncontent\n", encoding="utf-8")
+    settings = Settings(
+        vault_root=(tmp_path / "vault").resolve(),
+        state_root=tmp_path / "state",
+        agent_label="test",
+        rag_db=tmp_path / "state" / "index.db",
+        audit_log=tmp_path / "state" / "logs" / "audit.jsonl",
+        lock_dir=tmp_path / "state" / "locks",
+    )
+    registry, _ = build_registry(settings)
+    listed = dispatch("note_list", {}, registry)
+    assert ".Obsidian" not in json.dumps(listed)
+    assert ".obsidian" not in json.dumps(listed).lower()
+
+
+def test_no_permanent_delete_anywhere_on_the_surface(tools) -> None:
+    """The gateway's whole design point: the only removal is a manifest-backed
+    archive. The Node health check asserted this at the wire; assert it here.
+    (Node p0-security.test.mjs / verify-mcp checks.noPermanentDelete.)"""
+    registry, _ = tools
+    names = set(registry)
+    assert not {"delete_note", "delete_file", "rm", "remove_note"} & names
+    for spec in registry.values():
+        assert "delete" not in spec.description.lower(), spec.name
+
+
+def test_moving_into_the_private_zone_is_denied(tools) -> None:
+    """Reading private is denied; parking a note *inside* it is the other half
+    of the same boundary — exfiltration by relocation.
+    (Node verify-mcp checks.moveIntoPrivateDenied.)"""
+    registry, settings = tools
+    read = dispatch("note_read", {"note": "40_Persona/Preferences/monthly-review.md"}, registry)
+    payload = dispatch(
+        "note_move",
+        {"note": "40_Persona/Preferences/monthly-review.md",
+         "destination": "95_Private/stolen.md",
+         "expected_hash": read["hash"]},
+        registry,
+    )
+    assert payload["isError"] is True
+    assert (settings.vault_root / "95_Private/stolen.md").exists() is False
+
+
 def test_path_traversal_is_refused(tools) -> None:
     registry, _ = tools
     payload = dispatch("note_read", {"note": "../../etc/passwd"}, registry)
