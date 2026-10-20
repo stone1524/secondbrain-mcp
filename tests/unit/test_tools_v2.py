@@ -485,6 +485,58 @@ def test_archive_then_restore_round_trip(tools) -> None:
     assert (settings.vault_root / note).exists()
 
 
+def test_restore_accepts_a_legacy_manifest_without_a_schema_stamp(tools) -> None:
+    """The production rollback trap: the Node auto-archiver writes manifests
+    with no schema_version, and the Python restore refused any manifest without
+    a recognized stamp — every note the nightly job archived became
+    un-restorable, silently breaking the no-delete guarantee's rollback half.
+    Legacy entries share the {from, to, hash} shape, and untrusted paths are
+    re-validated regardless of stamp; the version gate governs interpretation,
+    not safety."""
+    registry, settings = tools
+    source = settings.vault_root / "00_Inbox/Web/legacy.md"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("# legacy\ncontent\n", encoding="utf-8")
+    archived = dispatch("archive", {"notes": [{"note": "00_Inbox/Web/legacy.md"}]}, registry)
+    batch_id = archived["manifest"]
+
+    manifest_path = settings.vault_root / "98_Archive/.manifests" / f"{batch_id}.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    # strip the Python stamp; add the auto-archive's own fields
+    manifest.pop("schema_version")
+    manifest["policy"] = {"categories": ["agent_generated_stale"], "max_per_run": 200}
+    manifest["summary"] = {"scanned": 3, "archived": 1}
+    for entry in manifest["entries"]:
+        entry["category"] = "agent_generated_stale"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    payload = dispatch("restore", {"batch_id": batch_id}, registry)
+    assert payload["restored"] == 1
+    assert source.read_text(encoding="utf-8") == "# legacy\ncontent\n"
+
+
+def test_restore_refuses_an_unknown_future_stamp(tools) -> None:
+    """Legacy means *absent* or 1; a stamp from a format nobody can interpret
+    must still be refused — that was the gate's point."""
+    registry, settings = tools
+    manifest_dir = settings.vault_root / "98_Archive/.manifests"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    (manifest_dir / "batch-future.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 99,
+                "batch_id": "batch-future",
+                "entries": [{"from": "00_Inbox/Web/a.md", "to": "98_Archive/x.md", "hash": ""}],
+                "restores": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    payload = dispatch("restore", {"batch_id": "batch-future"}, registry)
+    assert payload["isError"] is True
+    assert "schema_version" in payload["error"]["message"]
+
+
 def test_restore_refuses_a_hostile_manifest(tools) -> None:
     """Absolute and traversing paths in a manifest must never move a file."""
     registry, settings = tools
@@ -514,16 +566,34 @@ def test_restore_refuses_a_hostile_manifest(tools) -> None:
     assert not (settings.vault_root / "00_Inbox/Web/injected.md").exists()
 
 
-def test_restore_rejects_an_unknown_manifest_schema(tools) -> None:
+def test_restore_accepts_versionless_but_rejects_unknown_future_schema(tools) -> None:
+    """The corrected boundary. A manifest with no schema_version is the *legacy*
+    shape (the Node auto-archiver never stamped) and must restore; a stamp from
+    a format nobody here can interpret (a future v2) must be refused. The old
+    contract rejected the versionless case too — which silently made every note
+    the nightly job archived un-restorable, breaking the no-delete guarantee's
+    rollback half. Paths are re-validated either way; the gate is about
+    interpretation, not trust."""
     registry, settings = tools
     manifest_dir = settings.vault_root / "98_Archive/.manifests"
     manifest_dir.mkdir(parents=True, exist_ok=True)
-    (manifest_dir / "batch-old.json").write_text(
-        json.dumps({"batch_id": "batch-old", "entries": []}), encoding="utf-8"
+
+    versionless = manifest_dir / "batch-legacy.json"
+    versionless.write_text(
+        json.dumps({"batch_id": "batch-legacy", "entries": []}), encoding="utf-8"
     )
-    payload = dispatch("restore", {"batch_id": "batch-old"}, registry)
-    assert payload["isError"] is True
-    assert payload["error"]["code"] == "INVALID_ARGUMENTS"
+    accepted = dispatch("restore", {"batch_id": "batch-legacy"}, registry)
+    assert accepted.get("isError") is not True
+    assert accepted["restored"] == 0
+
+    future = manifest_dir / "batch-future2.json"
+    future.write_text(
+        json.dumps({"batch_id": "batch-future2", "schema_version": 2, "entries": []}),
+        encoding="utf-8",
+    )
+    refused = dispatch("restore", {"batch_id": "batch-future2"}, registry)
+    assert refused["isError"] is True
+    assert refused["error"]["code"] == "INVALID_ARGUMENTS"
 
 
 # ---------- review ----------

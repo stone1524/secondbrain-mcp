@@ -195,7 +195,15 @@ class ArchiveService:
     ) -> dict:
         manifest_path = self._resolve_manifest(batch_id)
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        schema_version = manifest.get("schema_version")
+        # The Node auto-archiver's manifests carry no schema_version at all.
+        # Requiring the stamp refused every one of them — the nightly job
+        # archived, and the no-delete guarantee's rollback half silently died
+        # (10 of 10 live manifests were un-restorable). An absent stamp means
+        # the legacy shape, which is identical here: entries are {from, to,
+        # hash}, and both sides are re-validated as untrusted regardless.
+        # The gate guards *interpretation*: a stamp from an unknown future
+        # format is still refused.
+        schema_version = manifest.get("schema_version", MANIFEST_SCHEMA_VERSION)
         if schema_version != MANIFEST_SCHEMA_VERSION:
             raise InvalidArguments(
                 f"Unsupported manifest schema_version: {schema_version}",
