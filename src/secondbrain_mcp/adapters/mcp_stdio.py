@@ -70,6 +70,7 @@ def build_registry(settings: Settings | None = None) -> tuple[dict[str, ToolSpec
             indexer=indexer,
             searcher=searcher,
             embedder=embedder,
+            lock_dir=settings.lock_dir,
         ),
         settings,
     )

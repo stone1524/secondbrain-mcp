@@ -17,9 +17,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..core.errors import GatewayError, InvalidArguments
+from ..core.locking import FileLock, LockConflictError
 from ..core.policy import NotePath, VaultPathError
 from ..index.embed import Embedder
 from ..index.indexer import Indexer
+from ..index.schema import SCHEMA_VERSION, connect, get_meta
 from ..index.schema import status as index_status
 from ..index.searcher import Query, Searcher
 from ..services.archive import ArchiveService
@@ -35,6 +37,79 @@ class ToolSpec:
     handler: Callable[..., Any]
 
 
+def _index_is_stale(db_path, vault_root) -> bool:
+    """A database whose tables the read path would drop, or whose documents are
+    indexed but no longer resolve, is not answerable — the schema version lives
+    inside `initialize()`, which DROPs on mismatch. Detection therefore reads
+    raw, through `connect()` only, so checking can never destroy.
+
+    This is the restart trap: schema mismatch -> first *read-only* search
+    silently wipes the index and returns empty forever, because nothing else
+    re-invokes the indexer. The registry closes that loop lazily.
+    """
+    try:
+        connection = connect(db_path)
+    except Exception:  # noqa: BLE001 - unreadable database is "stale", rebuilt
+        return True
+    try:
+        tables = {
+            row["name"]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        if "documents" not in tables:
+            return True  # empty or pre-schema file: initialize() may DROP
+        version = get_meta(connection, "schema_version")
+        if version is None:
+            return True
+        if int(version) != SCHEMA_VERSION:
+            return True  # initialize() would DROP and rebuild
+        active = connection.execute(
+            "SELECT COUNT(*) AS n FROM documents WHERE active = 1"
+        ).fetchone()["n"]
+        if active == 0:
+            return True  # nothing indexed yet
+        # Wrong-vault guard: if every indexed path has left the disk, the
+        # database describes a different root and must be rebuilt.
+        # (Partial churn is the periodic index_rebuild's job, not a per-query
+        # disk scan's.)
+        paths = [
+            row["path"]
+            for row in connection.execute(
+                "SELECT path FROM documents WHERE active = 1 LIMIT 50"
+            ).fetchall()
+        ]
+        return bool(paths) and not any((vault_root / path).exists() for path in paths)
+    except Exception:  # noqa: BLE001 - an index we cannot inspect counts as stale; the rebuild is the recovery
+        return True
+    finally:
+        connection.close()
+
+
+def _ensure_index(indexer: Indexer, lock_dir) -> str | None:
+    """Rebuild in place when the index cannot answer. Returns a note for the
+    caller to surface, or None when nothing happened.
+
+    A lock keeps N client processes from rebuilding simultaneously; the loser
+    does not block — a schema-reconciled database is already good enough to
+    answer with. Embedding may be slow (seconds per note); that is paid once
+    per restart, in the first query, instead of the index being silently dead.
+    """
+    if not _index_is_stale(indexer.db_path, indexer.vault_root):
+        return None
+    try:
+        with FileLock(lock_dir, indexer.db_path, relative_name="index-rebuild"):
+            # Re-check under the lock: a sibling process may have just rebuilt.
+            if _index_is_stale(indexer.db_path, indexer.vault_root):
+                indexer.rebuild()
+    except LockConflictError:
+        return "index rebuild is running in another process; results may be partial"
+    except Exception as error:  # noqa: BLE001 - a failed rebuild must not kill the read
+        return f"lazy index rebuild failed: {error}; results may be missing"
+    return "index was stale (schema mismatch or empty); rebuilt automatically"
+
+
 def build_tools(
     *,
     notes: NoteService,
@@ -43,6 +118,7 @@ def build_tools(
     indexer: Indexer,
     searcher: Searcher,
     embedder: Embedder,
+    lock_dir=None,
 ) -> dict[str, ToolSpec]:
     def search(
         query: str,
@@ -51,6 +127,10 @@ def build_tools(
         paths: list[str] | None = None,
         include_archive: bool = False,
     ) -> dict:
+        if lock_dir is not None:
+            note = _ensure_index(indexer, lock_dir)
+        else:
+            note = None
         prefixes = tuple(paths or ())
         hits, diagnostics = searcher.search(
             Query(
@@ -72,6 +152,8 @@ def build_tools(
             "diagnostics": diagnostics.as_dict(),
             "requires_note_read_for_full_evidence": True,
         }
+        if note:
+            payload["index_note"] = note
         if not hits:
             payload["empty_reason"] = _empty_reason(
                 diagnostics, prefixes, include_archive
@@ -81,6 +163,15 @@ def build_tools(
     def index_rebuild(force: bool = False) -> dict:
         report = indexer.rebuild(force=force)
         return report.as_dict()
+
+    def index_status_tool() -> dict:
+        payload = dict(index_status(indexer.db_path))
+        if lock_dir is not None:
+            note = _ensure_index(indexer, lock_dir)
+            if note:
+                payload["index_note"] = note
+                payload.update(index_status(indexer.db_path))
+        return payload
 
     specs = [
         ToolSpec(
@@ -143,7 +234,7 @@ def build_tools(
             "non-zero null_embedding_chunks means embedding failed and the next "
             "index_rebuild will retry it.",
             {"type": "object", "properties": {}},
-            lambda: index_status(indexer.db_path),
+            index_status_tool,
         ),
         ToolSpec(
             "index_rebuild",

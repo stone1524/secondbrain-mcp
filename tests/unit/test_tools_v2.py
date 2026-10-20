@@ -71,6 +71,59 @@ def tools(tmp_path: Path):
     return registry, settings
 
 
+# ---------- lazy rebuild (the restart trap) ----------
+
+
+def test_search_rebuilds_a_never_indexed_vault(tmp_path: Path) -> None:
+    """Before the fix, a fresh client whose index_rebuild had not run returned
+    zero hits forever — search silently served an empty index. The read path
+    must reconcile the index itself when it cannot answer."""
+    registry, _ = build_registry(make_settings(tmp_path))  # no index_rebuild call
+    payload = dispatch("search", {"query": "每月 检视"}, registry)
+    assert payload["hits"], "search must not be permanently dead on a cold database"
+    assert "index_note" in payload and "rebuilt automatically" in payload["index_note"]
+
+
+def test_schema_mismatch_rebuilds_instead_of_wiping(tmp_path: Path) -> None:
+    """The restart trap: initialize() DROPs a schema-mismatched database. A
+    read-only search must rebuild it back, not report an empty vault."""
+    import sqlite3
+
+    registry, settings = build_registry(make_settings(tmp_path))
+    dispatch("index_rebuild", {}, registry)
+    # forge a stale schema stamp the way a prior-version on-disk database looks
+    connection = sqlite3.connect(settings.rag_db)
+    connection.execute("UPDATE meta SET value='0' WHERE key='schema_version'")
+    connection.commit()
+    connection.close()
+
+    payload = dispatch("search", {"query": "每月 检视"}, registry)
+    assert "rebuilt automatically" in payload["index_note"]
+    assert payload["hits"], "the dropped-and-rebuilt index must answer again"
+    # schema stamp is healed back to current
+    connection = sqlite3.connect(settings.rag_db)
+    stored = connection.execute(
+        "SELECT value FROM meta WHERE key='schema_version'"
+    ).fetchone()[0]
+    connection.close()
+    assert stored == str(SCHEMA_VERSION)
+
+
+def test_healthy_index_does_not_rebuild_every_query(tmp_path: Path) -> None:
+    """Lazy reconcile must not turn every search into a full re-scan of the
+    vault; a current index answers directly with no index_note."""
+    registry, _ = tools_fixture(tmp_path)
+    payload = dispatch("search", {"query": "每月 检视"}, registry)
+    assert payload["hits"]
+    assert "index_note" not in payload, "a healthy index must not rebuild per query"
+
+
+def tools_fixture(tmp_path: Path):
+    registry, settings = build_registry(make_settings(tmp_path))
+    dispatch("index_rebuild", {}, registry)
+    return registry, settings
+
+
 # ---------- tool surface ----------
 
 
